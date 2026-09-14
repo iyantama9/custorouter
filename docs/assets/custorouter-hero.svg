@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img" aria-labelledby="title desc">
-  <title id="title">Iyan Router request control plane</title>
+  <title id="title">CustoRouter request control plane</title>
   <desc id="desc">A precise dark system map connecting compatible clients to a policy router, upstream pools, telemetry, and memory.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">

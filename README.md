@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/iyan-router-hero.svg" alt="Iyan Router request control plane" width="100%" />
+  <img src="docs/assets/custorouter-hero.svg" alt="CustoRouter request control plane" width="100%" />
 </p>
 
-<h1 align="center">Iyan Router</h1>
+<h1 align="center">CustoRouter</h1>
 
 <p align="center">
   A self-hosted AI gateway for compatible APIs, access policy, credential rotation, live operations, and searchable memory.
@@ -21,7 +21,7 @@
 
 ## Overview
 
-Iyan Router exposes OpenAI-compatible and Anthropic-compatible request surfaces through one FastAPI service. A request is authenticated, checked against its client policy, mapped to the correct upstream connection, translated when required, and recorded for operations. Streaming text, reasoning events, and tool calls remain compatible with the calling protocol.
+CustoRouter exposes OpenAI-compatible and Anthropic-compatible request surfaces through one FastAPI service. A request is authenticated, checked against its client policy, mapped to the correct upstream connection, translated when required, and recorded for operations. Streaming text, reasoning events, and tool calls remain compatible with the calling protocol.
 
 The live upstream inventory is dynamic. Clients discover what is available through `GET /v1/models`; this README intentionally does not publish provider or model lists that can become stale.
 

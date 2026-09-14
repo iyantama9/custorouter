@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Iyan Router | Dashboard{% endblock %}
+{% block title %}CustoRouter | Dashboard{% endblock %}
 
 {% block content %}
 <div class="min-h-screen flex" x-data="dashboard()" x-init="init()">
@@ -26,7 +26,7 @@
       </div>
       <div class="leading-none overflow-hidden transition-all duration-300"
            :class="sidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'">
-        <div class="font-display text-sm font-700 tracking-widest uppercase text-foreground whitespace-nowrap">Iyan Router</div>
+        <div class="font-display text-sm font-700 tracking-widest uppercase text-foreground whitespace-nowrap">CustoRouter</div>
         <div class="text-[9px] text-muted-foreground tracking-[0.18em] uppercase mt-1 whitespace-nowrap">API Proxy</div>
       </div>
     </div>
@@ -1115,7 +1115,7 @@
                       <path d="M12 7.5v4m0 0-6 5m6-5 6 5"/>
                     </svg>
                     <div class="leading-none">
-                      <div class="font-display text-xs font-700 tracking-widest uppercase">Iyan Router</div>
+                      <div class="font-display text-xs font-700 tracking-widest uppercase">CustoRouter</div>
                       <div class="text-[9px] opacity-70 font-mono mt-1" x-text="`${formatNumber(routing.totals.requests)} req`"></div>
                     </div>
                   </div>

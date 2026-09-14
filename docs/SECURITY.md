@@ -2,7 +2,7 @@
 
 ## Scope
 
-Iyan Router handles provider credentials, managed client keys, administrator sessions, prompts, model responses, usage records, and long-lived Brain memory. Treat the service and its database as sensitive infrastructure.
+CustoRouter handles provider credentials, managed client keys, administrator sessions, prompts, model responses, usage records, and long-lived Brain memory. Treat the service and its database as sensitive infrastructure.
 
 ## Current controls
 

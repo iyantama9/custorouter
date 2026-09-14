@@ -2,7 +2,7 @@
 
 ## Sources of configuration
 
-Iyan Router combines three configuration layers:
+CustoRouter combines three configuration layers:
 
 1. Environment variables establish process, database, security, memory, and built-in upstream settings.
 2. PostgreSQL stores managed client keys, custom upstreams, disabled routes, and runtime controls.
