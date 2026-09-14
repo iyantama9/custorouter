@@ -1,400 +1,179 @@
-# LLM Router - Docker Edition
+# Iyan Router
 
-Multi-provider LLM routing server with automatic failover, load balancing, and unified OpenAI-compatible API.
+<p align="center">
+  <img src="docs/assets/iyan-router-hero.svg" alt="Iyan Router, resilient multi-provider LLM gateway" width="100%" />
+</p>
 
-## 🎉 What's New - v2.0
+<p align="center">
+  <strong>One compatible endpoint for multiple model providers, client policies, live operations, and searchable AI memory.</strong>
+</p>
 
-**Docker Migration Complete!**
-- ✅ Migrated from Neon PostgreSQL to local Docker PostgreSQL
-- ✅ Full Docker containerization (app + database)
-- ✅ 4,433 rows of data migrated successfully (100 API keys, 4,314 requests)
-- ✅ SSL/HTTPS support with Let's Encrypt
-- ✅ One-command deployment ready
-- ✅ Production ready with auto-restart
+<p align="center">
+  <img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white">
+  <img alt="PostgreSQL 16" src="https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white">
+  <img alt="Docker Compose" src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white">
+  <img alt="License not granted" src="https://img.shields.io/badge/license-no_public_license-555">
+</p>
 
-## 🚀 Features
+> [!CAUTION]
+> This repository operates a credentialed gateway to paid or quota-limited AI services. A public source tree does not grant permission to reuse the code. Never commit provider keys, router client keys, session secrets, database credentials, exports, or production logs.
 
-- **Multi-Provider Support** — Route to 9+ LLM providers (Kimchi, Cavoti, BluesMinds, byNara, Dahl, Qwen Cloud, MarketKu, Atomesus, Weize)
-- **OpenAI-Compatible API** — Works with any OpenAI-compatible client
-- **Automatic Failover** — Smart key rotation on rate limits and errors
-- **Load Balancing** — Round-robin key rotation across 100+ API keys
-- **Web Dashboard** — Real-time monitoring and key management
-- **Request Logging** — Track all API calls with detailed statistics
-- **Docker Ready** — Full containerization with PostgreSQL
-- **SSL/HTTPS** — Built-in Let's Encrypt support
-- **Chat Playground** — Test models directly in browser
+Iyan Router is a self-hosted LLM gateway with OpenAI-compatible and Anthropic-compatible entry points. It selects a provider from the requested model prefix, applies client-specific model rules, rotates credentials when a provider is limited or slow, streams tool calls and reasoning fields, records operational telemetry, and optionally stores searchable conversation memory in Brain.
 
-## 📦 Tech Stack
+[Documentation index](DOCUMENTATION.md) | [Architecture](docs/ARCHITECTURE.md) | [API reference](docs/API_REFERENCE.md) | [Operations](docs/OPERATIONS.md) | [Security](docs/SECURITY.md)
 
-- **Backend**: Python 3.11 + FastAPI + Uvicorn
-- **Database**: PostgreSQL 16 (Docker)
-- **Auth**: bcrypt password hashing
-- **HTTP Client**: httpx for upstream requests
-- **Templates**: Jinja2 + Tailwind CSS
-- **Deployment**: Docker + Docker Compose
+## What it provides
 
-## 🚀 Quick Start
+| Area | Capability |
+| --- | --- |
+| Compatible inference | OpenAI chat completions and Anthropic messages, including streaming and tool calls |
+| Provider routing | Built-in provider prefixes plus database-defined custom providers |
+| Resilience | Key rotation, cooldowns, slow-response rotation, and bounded provider fallback |
+| Client policy | Expiry, token quota, model allowlist, aliases, and per-model system prompts |
+| Operations | Dashboard, request logs, live SSE activity, key inventory, model controls, and playground |
+| Brain | API-key-scoped conversations, semantic search, facts, decisions, profiles, and summaries |
 
-### Prerequisites
+## How a request moves through the router
 
-- Docker & Docker Compose installed
-- Domain pointing to your server (for SSL, optional)
-- Ports available: 80, 443, 4000, 5432
+```mermaid
+flowchart TD
+    A[Client request] --> B{Authentication}
+    B -->|Invalid| X[401 response]
+    B -->|Accepted| C[Resolve alias and model policy]
+    C --> D{Model allowed?}
+    D -->|No| Y[403 response]
+    D -->|Yes| E[Select provider from prefix]
+    E --> F[Translate request format]
+    F --> G[Choose an available credential]
+    G --> H[Call upstream model]
+    H -->|Limited or slow| I[Rotate or fall back]
+    I --> G
+    H -->|Success| J[Normalize stream or response]
+    J --> K[Record usage and request telemetry]
+    K --> L[Optional Brain persistence]
+    L --> M[Compatible client response]
+```
 
-### Local Development
+The request path is deterministic until provider selection. Brain persistence is intentionally outside the critical response path, so a Brain failure does not break an otherwise valid inference response. Some direct custom-provider paths currently bypass Brain persistence; see [Architecture](docs/ARCHITECTURE.md).
+
+## Public model namespaces
+
+Model identifiers use a prefix to select a provider family. The live list is returned by `GET /v1/models`; avoid hardcoding a model count because provider inventories change.
+
+| Prefix | Provider family |
+| --- | --- |
+| `bm/` | BluesMinds |
+| `nry/` | byNara |
+| `dh/` | Dahl |
+| `qc/` | Qwen Cloud |
+| `mk/` | MarketKu |
+| Configured prefix | Custom provider stored in PostgreSQL |
+
+## Quick start
+
+### Requirements
+
+- Docker Engine with Docker Compose
+- A populated `.env` based on `.env.example`
+- At least one usable upstream provider credential
+- A strong admin password hash and session secret
 
 ```bash
-# 1. Clone repository
-git clone <your-repo-url>
-cd llm-router
-
-# 2. Configure environment (optional, has defaults)
 cp .env.example .env
-# Edit .env with your API keys
-
-# 3. Start services
-docker-compose up -d
-
-# 4. Check status
-docker-compose ps
-
-# 5. Access dashboard
-open http://localhost:4000/dashboard
+docker compose up -d --build
+curl http://localhost:4000/brain/health
 ```
 
-### Production Deployment
+The Compose file also references an optional sibling build context at `../copilot-api`. That directory is absent from this checkout. Restore that sibling project or remove the optional service before running the full Compose stack.
 
-**Option 1: Automated (from local machine)**
+Open `http://localhost:4000/login` for the operator dashboard. Production access should terminate TLS at a reverse proxy and restrict the dashboard to trusted operators.
+
+### OpenAI-compatible request
 
 ```bash
-# Deploy everything to server
-bash deploy-to-server.sh
-
-# Setup SSL with Let's Encrypt
-ssh root@178.128.59.20 'cd /root/llm-router && bash setup-ssl.sh'
-```
-
-**Option 2: Manual (on server)**
-
-```bash
-# 1. SSH to server
-ssh root@178.128.59.20
-
-# 2. Navigate to project
-cd /root/llm-router
-
-# 3. Start services
-docker-compose up -d
-
-# 4. Setup SSL (optional but recommended)
-bash setup-ssl.sh
-
-# 5. Verify deployment
-docker ps
-docker logs llm-router-app --tail 50
-```
-
-## 🔧 Configuration
-
-### Environment Variables (.env)
-
-```env
-# Database (Docker PostgreSQL)
-DATABASE_URL=postgresql://llm_router_user:llm_router_pass_2024@postgres:5432/llm_router
-
-# Server Configuration
-PORT=443  # Use 443 for HTTPS, 4000 for HTTP
-ROUTER_DOMAIN=routers.iyantama.tech
-
-# Security
-ADMIN_USERNAME=iyanadmin
-ADMIN_PASSWORD=your-secure-password
-ROUTER_PASSWORD=your-router-password
-
-# SSL/HTTPS (optional)
-SSL_KEYFILE=/app/ssl/key.pem
-SSL_CERTFILE=/app/ssl/cert.pem
-
-# Provider API Keys
-CASTAI_API_KEYS=key1,key2,key3
-CAVOTI_API_KEY=your-cavoti-key
-BLUESMINDS_API_KEY=your-bluesminds-key
-NARA_API_KEYS=key1,key2
-DAHL_API_KEYS=key1,key2
-QWEN_CLOUD_API_KEYS=key1,key2
-MARKETKU_API_KEYS=key1
-ATOMESUS_API_KEYS=key1
-WEIZE_API_KEYS=key1
-
-# Provider Model Lists (comma-separated)
-KIMCHI_MODELS=deepseek-v4-flash,glm-5.2-fp8,kimi-k2.7
-CAVOTI_MODELS=gpt-5.5,gpt-5.6-sol,claude-sonnet-4.6
-# ... etc
-```
-
-### Docker Services
-
-**PostgreSQL Database:**
-- Container: `llm-router-db`
-- Port: `5432:5432`
-- Volume: `postgres_data` (persistent storage)
-- Health checks: Automated
-
-**Application:**
-- Container: `llm-router-app`
-- Ports: `80:80`, `443:443`, `4000:4000`
-- Auto-restart: `unless-stopped`
-- Health checks: Automated
-
-## 🎮 Usage
-
-### API Endpoints
-
-**Chat Completion (OpenAI-compatible)**
-
-```bash
-curl -X POST http://localhost:4000/v1/chat/completions \
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $ROUTER_API_KEY" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_ROUTER_PASSWORD" \
   -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [
-      {"role": "user", "content": "Hello!"}
-    ],
-    "stream": true
+    "model": "qc/model-name",
+    "messages": [{"role": "user", "content": "Explain this request path."}],
+    "stream": false
   }'
 ```
 
-**With Claude Code**
+### Anthropic-compatible request
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:4000
-export ANTHROPIC_API_KEY=your-router-password
-
-claude --model deepseek-v4-flash "Write a hello world"
+curl http://localhost:4000/v1/messages \
+  -H "x-api-key: $ROUTER_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qc/model-name",
+    "max_tokens": 512,
+    "messages": [{"role": "user", "content": "Summarize the system."}]
+  }'
 ```
 
-**Admin Dashboard**
+## Client keys and policy
 
-- Dashboard: `http://localhost:4000/dashboard`
-- Login: username `iyanadmin`, password from `.env`
-- Features: Key management, request logs, statistics, SSE live updates
+Inference accepts either `Authorization: Bearer <key>` or `x-api-key: <key>`. Managed client keys can carry:
 
-**Chat Playground**
+- an expiration time;
+- a total token quota and current consumption;
+- an allowlist of models;
+- per-key model aliases;
+- per-model system prompts.
 
-- Access: `http://localhost:4000/playground`
-- Test models interactively
-- Manage chat sessions
+Aliases are resolved before provider routing. Prompts and allowlists therefore follow the resolved model identity. The administrator dashboard is a separate session-based trust boundary.
 
-## 📊 Supported Providers
+## Brain memory
 
-| Provider | Models Available | Keys Loaded |
-|----------|------------------|-------------|
-| Kimchi | 13 models | 13 keys |
-| Cavoti | 20 models | 4 keys |
-| BluesMinds | 50+ models | 2 keys |
-| byNara | 35+ models | 2 keys |
-| Dahl | 3 models | 8 keys |
-| Qwen Cloud | 149 models | 60 keys |
-| MarketKu | 11 models | 1 key |
-| Atomesus | Multiple | 9 keys |
-| Weize | 41 models | 1 key |
+Brain stores conversations, decisions, facts, and profiles under a hash of the authenticated client key. Semantic search uses local embeddings through FastEmbed with `all-MiniLM-L6-v2`. This keeps memory retrieval scoped per client while avoiding storage of the raw router key in Brain records.
 
-**Total: 100 API keys managing 300+ models**
+Brain health is public at `GET /brain/health`. Search and write routes apply the Brain router password check and derive their data scope from the supplied Bearer or `x-api-key` value. See the security note in the [API reference](docs/API_REFERENCE.md) before exposing these routes.
 
-## 🛠️ Management Commands
+## Data model
 
-### Docker Operations
+PostgreSQL persists provider credentials and controls, managed router keys, request logs, dashboard configuration, playground conversations, and Brain memory. The primary tables include:
+
+`api_keys`, `router_api_keys`, `custom_providers`, `disabled_providers`, `request_logs`, `server_config`, `chat_sessions`, `chat_messages`, `brain_conversations`, `brain_decisions`, `brain_facts`, and `brain_profiles`.
+
+Schema creation and compatible upgrades run during application startup. Back up the database before upgrading or changing provider configuration.
+
+## Operations and current limitations
+
+- `/brain/health` is the container health endpoint.
+- A background loop revisits limited keys every 60 seconds and resets keys whose cooldown has elapsed.
+- Request logs and SSE events power the live dashboard.
+- Provider and model totals are runtime values, so this documentation does not publish static counts.
+- The included Compose file exposes PostgreSQL on host port `5432` and contains a fixed database password. Change the password and bind PostgreSQL privately before internet deployment.
+- The login limiter is process-local. Multiple application replicas require a shared rate-limit store at the proxy or application layer.
+- No repository-wide automated test suite currently covers every provider adapter.
+
+Read [Operations](docs/OPERATIONS.md) before deployment and [Security](docs/SECURITY.md) before exposing any route publicly.
+
+## Validation
+
+Run the static Python check without contacting providers:
 
 ```bash
-# Start all services
-docker-compose up -d
-
-# Stop services
-docker-compose stop
-
-# Restart app only
-docker-compose restart app
-
-# View logs
-docker-compose logs -f
-
-# Check status
-docker-compose ps
-docker ps | grep llm-router
-
-# Stop and remove everything
-docker-compose down
-
-# Stop and remove including volumes
-docker-compose down -v
+python -m compileall app
 ```
 
-### Database Management
+The Brain integration script requires PostgreSQL and the embedding runtime:
 
 ```bash
-# Connect to database
-docker exec -it llm-router-db psql -U llm_router_user -d llm_router
-
-# Run SQL query
-docker exec llm-router-db psql -U llm_router_user -d llm_router -c "SELECT COUNT(*) FROM api_keys;"
-
-# Backup database
-docker exec llm-router-db pg_dump -U llm_router_user llm_router > backup.sql
-
-# Restore database
-docker exec -i llm-router-db psql -U llm_router_user -d llm_router < backup.sql
-
-# View table stats
-docker exec llm-router-db psql -U llm_router_user -d llm_router -c "\dt+"
+python test_brain_integration.py
 ```
 
-### Monitoring
+Provider integration checks can consume quota and may write request logs. Use dedicated test keys and a non-production database.
 
-```bash
-# Container stats
-docker stats llm-router-app llm-router-db
+## Credits
 
-# Disk usage
-docker system df
+Iyan Router is built with [Python](https://www.python.org/), [FastAPI](https://fastapi.tiangolo.com/), [Uvicorn](https://www.uvicorn.org/), [PostgreSQL](https://www.postgresql.org/), [asyncpg](https://github.com/MagicStack/asyncpg), [HTTPX](https://www.python-httpx.org/), [FastEmbed](https://github.com/qdrant/fastembed), [NumPy](https://numpy.org/), [bcrypt](https://github.com/pyca/bcrypt/), [Jinja](https://jinja.palletsprojects.com/), and [Docker](https://www.docker.com/). Upstream model and provider names remain the property of their respective owners.
 
-# App logs (last 100 lines)
-docker logs llm-router-app --tail 100
+## License
 
-# Follow logs in real-time
-docker logs llm-router-app -f
-```
-
-## 🔐 SSL/HTTPS Setup
-
-### Let's Encrypt (Production)
-
-```bash
-# Automatic setup
-bash setup-ssl.sh
-
-# Certificates will be:
-# - Generated via Certbot
-# - Auto-renewed twice daily
-# - Linked to /root/llm-router/ssl/
-```
-
-### Self-Signed (Development)
-
-```bash
-# Generate certificates
-bash generate-self-signed-ssl.sh
-
-# Restart to enable HTTPS
-docker-compose restart app
-```
-
-See [SSL_SETUP.md](SSL_SETUP.md) for detailed SSL configuration guide.
-
-## 📁 Project Structure
-
-```
-llm-router/
-├── app/                          # Application code
-│   ├── main.py                  # FastAPI entry point
-│   ├── config.py                # Config & key management
-│   ├── database.py              # PostgreSQL connection
-│   ├── translator.py            # Request/response translation
-│   └── routers/                 # API routes
-│       ├── admin.py            # Admin dashboard
-│       ├── proxy.py            # LLM proxy endpoints
-│       └── playground.py       # Chat playground
-├── templates/                    # HTML templates
-├── static/                      # Static assets
-├── ssl/                         # SSL certificates
-├── docker-compose.yml           # Docker services
-├── Dockerfile                   # App container
-├── requirements.txt             # Python dependencies
-├── .env                         # Environment variables
-├── deploy-to-server.sh          # Deployment script
-├── setup-ssl.sh                 # SSL setup script
-├── DOCKER_DEPLOYMENT.md         # Deployment guide
-├── SSL_SETUP.md                 # SSL guide
-└── README.md                    # This file
-```
-
-## 🐛 Troubleshooting
-
-### App Won't Start
-
-```bash
-# Check logs
-docker logs llm-router-app --tail 50
-
-# Check database is ready
-docker exec llm-router-db pg_isready -U llm_router_user
-
-# Restart services
-docker-compose restart
-```
-
-### Database Connection Issues
-
-```bash
-# Check PostgreSQL is running
-docker ps | grep llm-router-db
-
-# Check PostgreSQL logs
-docker logs llm-router-db --tail 50
-
-# Test connection
-docker exec llm-router-app psql -h postgres -U llm_router_user -d llm_router -c "SELECT 1;"
-```
-
-### SSL Certificate Issues
-
-```bash
-# Check certificates exist
-ls -la ssl/
-
-# Verify certificate
-openssl x509 -in ssl/cert.pem -text -noout
-
-# Renew Let's Encrypt
-certbot renew
-```
-
-### Port Conflicts
-
-```bash
-# Check what's using the port
-netstat -tulpn | grep :4000
-
-# Change port in docker-compose.yml if needed
-```
-
-## 📚 Documentation
-
-- **[DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)** - Complete deployment guide with all commands
-- **[SSL_SETUP.md](SSL_SETUP.md)** - SSL/HTTPS configuration (Let's Encrypt + self-signed)
-
-## 🔒 Security Notes
-
-1. **Change default passwords** in production
-2. **Use Let's Encrypt** for trusted SSL certificates
-3. **Keep API keys secure** - never commit to git
-4. **Enable firewall rules** - only allow necessary ports
-5. **Regular backups** - database and configuration
-6. **Monitor logs** - check for suspicious activity
-
-## 📈 Current Stats
-
-- **Requests Processed**: 4,314
-- **API Keys Managed**: 100
-- **Failovers Handled**: 779
-- **Data Migrated**: 4,433 rows
-
-## 👤 Author
-
-**Iyan Tama**
-
----
-
-**Version**: 2.0.0 (Docker Edition)  
-**Status**: ✅ Production Ready  
-**Last Updated**: 2026-07-24
+No public license is currently included. Copyright remains with the repository owner. Source availability alone does not grant rights to copy, modify, redistribute, host, or create derivative works.
