@@ -64,7 +64,7 @@ When a request comes to `/v1/messages`:
 
 ### 2. Embeddings
 
-**Primary**: sentence-transformers (all-MiniLM-L6-v2, 384 dimensions)
+**Primary**: the configured local sentence embedding backend
 **Fallback**: Simple TF-IDF-like token hashing
 
 Embeddings are cached in `brain_embeddings_cache.json` to avoid recomputation.
@@ -137,7 +137,7 @@ curl -X POST http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "kc/claude-sonnet-4",
+    "model": "<model-id>",
     "messages": [
       {"role": "user", "content": "What did we discuss about databases?"}
     ]
@@ -268,7 +268,7 @@ curl -X POST http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ROUTER_PASSWORD" \
   -d '{
-    "model": "kc/claude-sonnet-4",
+    "model": "<model-id>",
     "messages": [
       {"role": "user", "content": "I prefer using FastAPI for building APIs"}
     ]
@@ -287,7 +287,7 @@ curl -X POST http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_ROUTER_PASSWORD" \
   -d '{
-    "model": "kc/claude-sonnet-4",
+    "model": "<model-id>",
     "messages": [
       {"role": "user", "content": "What framework should I use for my new project?"}
     ]
@@ -363,7 +363,7 @@ Currently brain is always enabled. Future configuration options could be added t
 BRAIN_ENABLED=true
 BRAIN_MIN_SIMILARITY=0.3
 BRAIN_MAX_CONTEXT_ITEMS=3
-BRAIN_EMBEDDING_MODEL=all-MiniLM-L6-v2
+BRAIN_EMBEDDING_MODEL=<embedding-model-id>
 ```
 
 ## Troubleshooting

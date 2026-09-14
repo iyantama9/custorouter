@@ -1,58 +1,100 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
-  <title id="title">Iyan Router</title>
-  <desc id="desc">A dark technical diagram showing client requests routed through policy and provider layers to multiple AI models.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img" aria-labelledby="title desc">
+  <title id="title">Iyan Router request control plane</title>
+  <desc id="desc">A precise dark system map connecting compatible clients to a policy router, upstream pools, telemetry, and memory.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#07110e"/>
-      <stop offset="0.55" stop-color="#0d1415"/>
-      <stop offset="1" stop-color="#101114"/>
+      <stop stop-color="#07100e"/>
+      <stop offset=".58" stop-color="#0b1112"/>
+      <stop offset="1" stop-color="#0d0f12"/>
     </linearGradient>
-    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#35e6a1"/>
-      <stop offset="1" stop-color="#39bfff"/>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#33e6a0"/>
+      <stop offset="1" stop-color="#35bfff"/>
     </linearGradient>
-    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
-      <path d="M32 0H0V32" fill="none" stroke="#98a4a0" stroke-opacity=".08"/>
+    <radialGradient id="hub" cx="50%" cy="45%" r="65%">
+      <stop stop-color="#123329"/>
+      <stop offset="1" stop-color="#0d1816"/>
+    </radialGradient>
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M30 0H0V30" fill="none" stroke="#96b5ad" stroke-opacity=".055"/>
     </pattern>
-    <filter id="glow"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
-  <rect width="1200" height="420" rx="26" fill="url(#bg)"/>
-  <rect width="1200" height="420" rx="26" fill="url(#grid)"/>
-  <rect x="1" y="1" width="1198" height="418" rx="25" fill="none" stroke="#33403d"/>
+
+  <rect width="1200" height="460" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="460" rx="28" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1198" height="458" rx="27" fill="none" stroke="#2b3936"/>
+
   <g font-family="Inter,Segoe UI,Arial,sans-serif">
-    <text x="70" y="88" fill="#7d938c" font-size="13" font-weight="700" letter-spacing="4">MULTI PROVIDER LLM GATEWAY</text>
-    <text x="70" y="155" fill="#f4f7f6" font-size="56" font-weight="750" letter-spacing="7">IYAN ROUTER</text>
-    <text x="72" y="192" fill="#a8b3af" font-size="17" letter-spacing="1.5">Compatible APIs  ·  policy  ·  rotation  ·  telemetry  ·  memory</text>
-    <g transform="translate(72 255)">
-      <rect width="150" height="56" rx="12" fill="#151d1b" stroke="#2d4540"/>
-      <circle cx="27" cy="28" r="7" fill="#35e6a1"/>
-      <text x="48" y="34" fill="#dce6e2" font-size="14" font-weight="700">CLIENTS</text>
+    <text x="58" y="60" fill="#7d9991" font-size="12" font-weight="700" letter-spacing="3.6">REQUEST CONTROL PLANE</text>
+    <circle cx="1138" cy="56" r="5" fill="#33e6a0"/>
+    <text x="1120" y="61" text-anchor="end" fill="#7d9991" font-size="11" font-weight="700" letter-spacing="2">ONLINE</text>
+
+    <g transform="translate(58 117)">
+      <rect width="225" height="196" rx="18" fill="#111918" stroke="#263d38"/>
+      <text x="24" y="33" fill="#758a85" font-size="10" font-weight="700" letter-spacing="2.4">COMPATIBLE CLIENTS</text>
+      <g transform="translate(24 58)">
+        <rect width="177" height="43" rx="10" fill="#151f1d" stroke="#2a413c"/>
+        <circle cx="23" cy="21.5" r="5" fill="#33e6a0"/>
+        <text x="42" y="26" fill="#e9f1ee" font-size="13" font-weight="650">Chat API</text>
+      </g>
+      <g transform="translate(24 111)">
+        <rect width="177" height="43" rx="10" fill="#151f1d" stroke="#2a413c"/>
+        <path d="M18 16h11M18 22h11M18 28h7" stroke="#35bfff" stroke-width="2" stroke-linecap="round"/>
+        <text x="42" y="26" fill="#e9f1ee" font-size="13" font-weight="650">Message API</text>
+      </g>
     </g>
-    <path d="M222 283H338" stroke="url(#line)" stroke-width="3"/>
-    <path d="m327 274 14 9-14 9" fill="none" stroke="#35e6a1" stroke-width="3"/>
-    <g transform="translate(340 235)" filter="url(#glow)">
-      <rect width="250" height="96" rx="18" fill="#10221c" stroke="#35e6a1"/>
-      <text x="125" y="41" text-anchor="middle" fill="#f3f8f6" font-size="17" font-weight="750">ROUTE + POLICY</text>
-      <text x="125" y="67" text-anchor="middle" fill="#70d9b4" font-size="12" letter-spacing="1.5">AUTH  ALIAS  QUOTA</text>
+
+    <path d="M283 215H407" stroke="url(#accent)" stroke-width="2.5"/>
+    <path d="m394 205 16 10-16 10" fill="none" stroke="#35d8ae" stroke-width="2.5"/>
+
+    <g transform="translate(410 102)" filter="url(#softGlow)">
+      <circle cx="170" cy="113" r="110" fill="#07100e" fill-opacity=".7"/>
+      <circle cx="170" cy="113" r="86" fill="url(#hub)" stroke="#33e6a0" stroke-width="1.5"/>
+      <circle cx="170" cy="113" r="66" fill="none" stroke="#2d6d59" stroke-dasharray="3 7"/>
+      <path d="M142 91h56M142 113h56M142 135h36" stroke="#e5f4ef" stroke-width="4" stroke-linecap="round"/>
+      <circle cx="207" cy="135" r="5" fill="#35bfff"/>
+      <text x="170" y="227" text-anchor="middle" fill="#f3f8f6" font-size="16" font-weight="750">ROUTE + POLICY</text>
+      <text x="170" y="247" text-anchor="middle" fill="#6fa995" font-size="10" font-weight="700" letter-spacing="2">AUTH · QUOTA · ALIAS</text>
     </g>
-    <path d="M590 283H706" stroke="url(#line)" stroke-width="3"/>
-    <path d="m695 274 14 9-14 9" fill="none" stroke="#39bfff" stroke-width="3"/>
-    <g transform="translate(708 248)">
-      <rect width="142" height="70" rx="14" fill="#151d1f" stroke="#345057"/>
-      <text x="71" y="31" text-anchor="middle" fill="#f1f5f4" font-size="14" font-weight="700">PROVIDER A</text>
-      <text x="71" y="51" text-anchor="middle" fill="#839894" font-size="11">PRIMARY</text>
+
+    <path d="M750 215H842" stroke="url(#accent)" stroke-width="2.5"/>
+    <path d="m829 205 16 10-16 10" fill="none" stroke="#35bfff" stroke-width="2.5"/>
+
+    <g transform="translate(845 100)">
+      <rect width="297" height="230" rx="18" fill="#111718" stroke="#2b3c3f"/>
+      <text x="24" y="34" fill="#75888b" font-size="10" font-weight="700" letter-spacing="2.4">UPSTREAM POOLS</text>
+      <g transform="translate(24 58)">
+        <rect width="249" height="43" rx="10" fill="#151d1e" stroke="#30474b"/>
+        <text x="19" y="26" fill="#dfe8e7" font-size="12" font-weight="700">PRIMARY</text>
+        <circle cx="219" cy="21" r="5" fill="#33e6a0"/>
+      </g>
+      <g transform="translate(24 111)">
+        <rect width="249" height="43" rx="10" fill="#151d1e" stroke="#30474b"/>
+        <text x="19" y="26" fill="#dfe8e7" font-size="12" font-weight="700">ROTATION</text>
+        <path d="M213 16a8 8 0 1 1-1 11M211 27h6v-6" fill="none" stroke="#35bfff" stroke-width="1.8"/>
+      </g>
+      <g transform="translate(24 164)">
+        <rect width="249" height="43" rx="10" fill="#151d1e" stroke="#30474b"/>
+        <text x="19" y="26" fill="#dfe8e7" font-size="12" font-weight="700">CUSTOM</text>
+        <path d="M214 21h11M219.5 15.5v11" stroke="#9ba8aa" stroke-width="1.8" stroke-linecap="round"/>
+      </g>
     </g>
-    <g transform="translate(874 248)">
-      <rect width="142" height="70" rx="14" fill="#151d1f" stroke="#345057"/>
-      <text x="71" y="31" text-anchor="middle" fill="#f1f5f4" font-size="14" font-weight="700">PROVIDER B</text>
-      <text x="71" y="51" text-anchor="middle" fill="#839894" font-size="11">ROTATION</text>
+
+    <path d="M580 346V376" stroke="#2c6c58" stroke-width="2" stroke-dasharray="4 5"/>
+    <g transform="translate(281 377)">
+      <rect width="598" height="51" rx="13" fill="#111817" stroke="#253936"/>
+      <g fill="#99aaa5" font-size="10" font-weight="700" letter-spacing="1.4">
+        <text x="63" y="31" text-anchor="middle">IDENTITY</text>
+        <text x="216" y="31" text-anchor="middle">TELEMETRY</text>
+        <text x="379" y="31" text-anchor="middle">MEMORY</text>
+        <text x="531" y="31" text-anchor="middle">OPERATIONS</text>
+      </g>
+      <g fill="#33e6a0"><circle cx="10" cy="25" r="3"/><circle cx="163" cy="25" r="3"/></g>
+      <g fill="#35bfff"><circle cx="326" cy="25" r="3"/><circle cx="478" cy="25" r="3"/></g>
     </g>
-    <g transform="translate(1040 248)">
-      <rect width="90" height="70" rx="14" fill="#151d1f" stroke="#345057"/>
-      <text x="45" y="43" text-anchor="middle" fill="#39bfff" font-size="22" font-weight="700">+N</text>
-    </g>
-    <path d="M850 283H874M1016 283H1040" stroke="#36575c" stroke-width="2" stroke-dasharray="5 5"/>
-    <text x="72" y="375" fill="#60736d" font-size="11" font-weight="700" letter-spacing="3">STREAMING READY</text>
-    <text x="1128" y="375" text-anchor="end" fill="#60736d" font-size="11" font-weight="700" letter-spacing="3">BRAIN ENABLED</text>
   </g>
 </svg>

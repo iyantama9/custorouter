@@ -7,17 +7,20 @@ This page is the entry point for maintainers, operators, and client developers.
 | [README](README.md) | Product overview, quick start, examples, and current limitations |
 | [Architecture](docs/ARCHITECTURE.md) | Runtime components, request lifecycle, provider adapters, Brain, and data boundaries |
 | [API reference](docs/API_REFERENCE.md) | Compatible inference, admin, playground, and Brain routes |
+| [Configuration](docs/CONFIGURATION.md) | Environment, client policies, upstream configuration, and safe changes |
+| [Data model](docs/DATA_MODEL.md) | PostgreSQL ownership, operational records, and retention boundaries |
 | [Operations](docs/OPERATIONS.md) | Configuration, deployment, health, backup, restore, monitoring, and incidents |
 | [Security](docs/SECURITY.md) | Trust boundaries, secret handling, hardening priorities, and reporting |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptom-based diagnosis without uncontrolled retries |
 | [Brain integration](BRAIN_INTEGRATION.md) | Existing implementation guide for persistent memory |
 
 ## Recommended reading paths
 
 **Client developer:** README, API reference, then the authentication and streaming sections of Architecture.
 
-**Operator:** README, Operations, Security, then the persistence section of Architecture.
+**Operator:** README, Configuration, Operations, Security, then Troubleshooting.
 
-**Maintainer:** Architecture, API reference, Operations, and the source modules referenced by each document.
+**Maintainer:** Architecture, API reference, Data model, Operations, and the source modules referenced by each document.
 
 ## Documentation principles
 
