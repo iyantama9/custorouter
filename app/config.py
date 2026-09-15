@@ -209,6 +209,8 @@ async def init_state_from_db():
     QC_API_KEYS.clear()
     MARKETKU_API_KEYS.clear()
     key_statuses.clear()
+    qc_model_key_index.clear()
+    qc_model_failures.clear()
 
     # Load custom (admin-added) providers and disabled built-ins first, so the
     # key-loading loop below knows where to put keys for a custom provider
@@ -297,6 +299,16 @@ async def init_state_from_db():
                 "INSERT INTO api_keys (key_value, key_prefix, status, provider) VALUES ($1, $2, $3, 'qc') ON CONFLICT (key_value) DO UPDATE SET provider='qc'",
                 qc_key, prefix, "Standby"
             )
+
+    # A QC quota belongs to a key/model pair. Restore those pairs so a
+    # process restart or deployment does not retry already exhausted slots.
+    exhausted_rows = await db_fetch(
+        "SELECT key_value, model FROM qc_model_exhaustions ORDER BY exhausted_at"
+    )
+    for row in exhausted_rows:
+        key = row["key_value"]
+        if key in QC_API_KEYS:
+            qc_model_failures.setdefault(key, {})[row["model"]] = True
 
     # Seed MarketKu keys from env
     for mk_key in MARKETKU_API_KEYS_ENV:
@@ -471,12 +483,17 @@ def get_current_qc_key_for_model(model: str) -> str:
     """
     if not QC_API_KEYS:
         return ""
-    idx = qc_model_key_index.get(model, 0)
-    idx = idx % len(QC_API_KEYS)
-    return QC_API_KEYS[idx]
+    start_idx = qc_model_key_index.get(model, 0) % len(QC_API_KEYS)
+    for offset in range(len(QC_API_KEYS)):
+        idx = (start_idx + offset) % len(QC_API_KEYS)
+        candidate = QC_API_KEYS[idx]
+        if not is_qc_model_exhausted(candidate, model):
+            qc_model_key_index[model] = idx
+            return candidate
+    return ""
 
 
-def rotate_qc_key_for_model(model: str) -> bool:
+def rotate_qc_key_for_model(model: str, after_key: str | None = None) -> bool:
     """Move to the next key that has not exhausted quota for this model.
 
     Returns True if a fresh key is found, False if all keys have exhausted
@@ -486,14 +503,17 @@ def rotate_qc_key_for_model(model: str) -> bool:
     if not QC_API_KEYS:
         return False
 
-    start_idx = qc_model_key_index.get(model, 0)
+    if after_key in QC_API_KEYS:
+        start_idx = QC_API_KEYS.index(after_key)
+    else:
+        start_idx = qc_model_key_index.get(model, 0) % len(QC_API_KEYS)
     for offset in range(1, len(QC_API_KEYS) + 1):
         idx = (start_idx + offset) % len(QC_API_KEYS)
         candidate = QC_API_KEYS[idx]
         if not is_qc_model_exhausted(candidate, model):
             qc_model_key_index[model] = idx
             failover_count += 1
-            print(f"[LOG] Rotated qc key for model {model} → index {idx}: {candidate[:15]}...")
+            print(f"[LOG] Rotated qc key for model {model} -> index {idx}: {candidate[:15]}...")
             _bg(db_execute(
                 "INSERT INTO server_config (key, value) VALUES ('failover_count', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 str(failover_count)
@@ -512,6 +532,11 @@ def mark_qc_model_exhausted(key: str, model: str):
     if key not in qc_model_failures:
         qc_model_failures[key] = {}
     qc_model_failures[key][model] = True
+    _bg(db_execute(
+        "INSERT INTO qc_model_exhaustions (key_value, model) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        key,
+        model,
+    ))
 
 
 def is_qc_model_exhausted(key: str, model: str) -> bool:
@@ -527,6 +552,10 @@ def reset_qc_model_failures(key: str):
     """Clear per-model failure state for a key (e.g. on manual reset)."""
     if key in qc_model_failures:
         del qc_model_failures[key]
+    _bg(db_execute("DELETE FROM qc_model_exhaustions WHERE key_value = $1", key))
+    for model, idx in list(qc_model_key_index.items()):
+        if QC_API_KEYS and QC_API_KEYS[idx % len(QC_API_KEYS)] == key:
+            qc_model_key_index[model] = 0
 
 
 def rotate_qc_key(reason: str = "Limited"):

@@ -167,6 +167,18 @@ async def setup_tables():
         ALTER TABLE api_keys
         ADD COLUMN IF NOT EXISTS provider VARCHAR(20) DEFAULT 'kc'
     """)
+    await execute("""
+        CREATE TABLE IF NOT EXISTS qc_model_exhaustions (
+            key_value TEXT NOT NULL REFERENCES api_keys(key_value) ON DELETE CASCADE,
+            model TEXT NOT NULL,
+            exhausted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (key_value, model)
+        )
+    """)
+    await execute("""
+        CREATE INDEX IF NOT EXISTS idx_qc_model_exhaustions_model
+        ON qc_model_exhaustions(model)
+    """)
 
     # Provider column was added in a prior migration; new keys get provider set at insert time.
     # Add index for performance on pagination/sorting

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from app import database
+from app import config
 from app.translator import stream_as_anthropic
 from app.routers import proxy
 from app.sse import SSEBroadcaster
@@ -127,6 +128,105 @@ class AnthropicStreamTranslationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"type": "content_block_delta"', output)
         self.assertIn('"text": "OK"', output)
         self.assertIn('"type": "message_stop"', output)
+
+
+class QwenPerModelRotationTests(unittest.TestCase):
+    def setUp(self):
+        self.original_keys = list(config.QC_API_KEYS)
+        self.original_indexes = dict(config.qc_model_key_index)
+        self.original_failures = {
+            key: dict(models) for key, models in config.qc_model_failures.items()
+        }
+        self.original_failover_count = config.failover_count
+        config.QC_API_KEYS[:] = ["key-1", "key-2", "key-3"]
+        config.qc_model_key_index.clear()
+        config.qc_model_failures.clear()
+        self.bg_patcher = patch.object(config, "_bg", side_effect=lambda coro: coro.close())
+        self.bg_patcher.start()
+
+    def tearDown(self):
+        self.bg_patcher.stop()
+        config.QC_API_KEYS[:] = self.original_keys
+        config.qc_model_key_index.clear()
+        config.qc_model_key_index.update(self.original_indexes)
+        config.qc_model_failures.clear()
+        config.qc_model_failures.update(self.original_failures)
+        config.failover_count = self.original_failover_count
+
+    def test_each_model_starts_from_first_available_key(self):
+        config.mark_qc_model_exhausted("key-1", "glm-5.3")
+        self.assertEqual(config.get_current_qc_key_for_model("glm-5.3"), "key-2")
+        self.assertEqual(config.get_current_qc_key_for_model("qwen3.5-plus"), "key-1")
+
+    def test_rotation_is_relative_to_the_key_that_failed(self):
+        config.mark_qc_model_exhausted("key-1", "glm-5.3")
+        self.assertTrue(config.rotate_qc_key_for_model("glm-5.3", after_key="key-1"))
+        self.assertEqual(config.get_current_qc_key_for_model("glm-5.3"), "key-2")
+
+        # A concurrent failure from key-1 must not advance the shared cursor
+        # past key-2 merely because another request already rotated it.
+        self.assertTrue(config.rotate_qc_key_for_model("glm-5.3", after_key="key-1"))
+        self.assertEqual(config.get_current_qc_key_for_model("glm-5.3"), "key-2")
+
+    def test_returns_no_key_when_model_is_exhausted_everywhere(self):
+        for key in config.QC_API_KEYS:
+            config.mark_qc_model_exhausted(key, "glm-5.3")
+        self.assertEqual(config.get_current_qc_key_for_model("glm-5.3"), "")
+        self.assertFalse(config.rotate_qc_key_for_model("glm-5.3", after_key="key-3"))
+
+    def test_quota_failure_only_exhausts_the_requested_model(self):
+        self.assertTrue(proxy._rotate_qc_after_failure(
+            "glm-5.3", "key-1", 429, {"error": {"message": "quota exhausted"}}
+        ))
+        self.assertTrue(config.is_qc_model_exhausted("key-1", "glm-5.3"))
+        self.assertFalse(config.is_qc_model_exhausted("key-1", "qwen3.5-plus"))
+
+    def test_transient_failure_rotates_without_marking_quota_exhausted(self):
+        self.assertTrue(proxy._rotate_qc_after_failure(
+            "glm-5.3", "key-1", 500, {"error": {"message": "temporary failure"}}
+        ))
+        self.assertFalse(config.is_qc_model_exhausted("key-1", "glm-5.3"))
+
+
+class OpenAIStreamRelayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qwen_null_usage_stream_is_relayed_and_closed(self):
+        class FakeResponse:
+            def __init__(self):
+                self.closed = False
+
+            async def aiter_bytes(self):
+                yield b'data: {"model":"glm-5.3","choices":[{"delta":{"content":"OK"}}],"usage":null}\n\n'
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\n'
+                yield b'data: [DONE]\n\n'
+
+            async def aclose(self):
+                self.closed = True
+
+        response = FakeResponse()
+        request = object()
+        with (
+            patch.object(proxy, "add_request_log") as add_log,
+            patch.object(proxy, "_bill_router_key", AsyncMock()) as bill,
+            patch.object(proxy, "_broadcast_request_log", AsyncMock()) as broadcast,
+        ):
+            chunks = [
+                chunk async for chunk in proxy._relay_openai_upstream_stream(
+                    response,
+                    requested_model="qc/glm-5.3",
+                    display_model="qc/glm-5.3",
+                    current_key="key-1",
+                    provider="qc",
+                    started_at=0,
+                    request=request,
+                )
+            ]
+
+        output = b"".join(chunks)
+        self.assertIn(b'"content": "OK"', output)
+        self.assertTrue(response.closed)
+        add_log.assert_called_once()
+        bill.assert_awaited_once_with(request, 3)
+        broadcast.assert_awaited_once()
 
 
 if __name__ == "__main__":

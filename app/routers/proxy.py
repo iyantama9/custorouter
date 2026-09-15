@@ -15,8 +15,8 @@ from app.config import (
     BLUESMINDS_API_KEY, BLUESMINDS_BASE_URL,
     ROUTER_PASSWORD, NARA_BASE_URL, DAHL_BASE_URL, QWEN_CLOUD_BASE_URL, MARKETKU_BASE_URL,
     resolve_dahl_model, BM_API_KEYS, NR_API_KEYS, DAHL_API_KEYS, QC_API_KEYS, MARKETKU_API_KEYS,
-    get_current_bm_key, rotate_bm_key, get_current_nr_key, rotate_nr_key, get_current_dahl_key, rotate_dahl_key, get_current_qc_key, rotate_qc_key, get_current_marketku_key, rotate_marketku_key,
-    get_current_qc_key_for_model, rotate_qc_key_for_model, mark_qc_model_exhausted, QC_FALLBACK_ORDER,
+    get_current_bm_key, rotate_bm_key, get_current_nr_key, rotate_nr_key, get_current_dahl_key, rotate_dahl_key, get_current_marketku_key, rotate_marketku_key,
+    get_current_qc_key_for_model, rotate_qc_key_for_model, mark_qc_model_exhausted,
     recent_requests, add_request_log,
 )
 from app.translator import (
@@ -33,12 +33,33 @@ from app.sse import sse_broadcaster
 logger = logging.getLogger(__name__)
 from app.brain.middleware import BrainMiddleware
 from app.brain.memory import MemoryManager
-from app.brain.storage import BrainStorage
 from app.database import verify_router_api_key, add_router_key_token_usage
 
 
 router = APIRouter()
 MAX_REQUEST_BODY_BYTES = max(1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(25 * 1024 * 1024))))
+_RETRYABLE_UPSTREAM_STATUSES = {401, 402, 403, 404, 429, 500, 502, 503, 504}
+
+
+def _is_qc_model_quota_error(status_code: int, body) -> bool:
+    """Only model quota failures permanently exclude a QC key/model pair."""
+    if status_code in (402, 429):
+        return True
+    try:
+        detail = json.dumps(body, ensure_ascii=False).lower()
+    except Exception:
+        detail = str(body).lower()
+    quota_terms = (
+        "quota", "rate limit", "rate_limit", "insufficient balance",
+        "resource exhausted", "allocation exhausted",
+    )
+    return any(term in detail for term in quota_terms)
+
+
+def _rotate_qc_after_failure(model: str, key: str, status_code: int, body) -> bool:
+    if _is_qc_model_quota_error(status_code, body):
+        mark_qc_model_exhausted(key, model)
+    return rotate_qc_key_for_model(model, after_key=key)
 
 _UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 _CUSTOM_PROVIDER_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=15.0, pool=10.0)
@@ -833,7 +854,7 @@ async def messages(request: Request):
     elif provider == "dahl":
         current_key = get_current_dahl_key() if DAHL_API_KEYS else ""
     elif provider == "qc":
-        current_key = get_current_qc_key() if QC_API_KEYS else ""
+        current_key = get_current_qc_key_for_model(payload.get("model", "")) if QC_API_KEYS else ""
     elif provider == "marketku":
         current_key = get_current_marketku_key() if MARKETKU_API_KEYS else ""
 
@@ -894,18 +915,6 @@ async def messages(request: Request):
             session_id=session_id,
             enable_brain=enable_brain
         )
-
-    # Brain: models this user has recently given explicit negative feedback
-    # about, via DecisionTracker.apply_outcome_feedback. Used below to
-    # deprioritize (never hard-exclude) candidates when QC does automatic
-    # model fallback, so routing actually learns from past outcomes instead
-    # of only ever producing text for the prompt. Fails open on any error.
-    avoided_qc_models = set()
-    if enable_brain:
-        try:
-            avoided_qc_models = await BrainStorage.get_avoided_models(api_key_hash_for_brain)
-        except Exception as e:
-            print(f"[BRAIN] Error loading avoided models: {e}")
 
     # Brain: Inject brain context into payload
     if brain_context:
@@ -977,6 +986,11 @@ async def messages(request: Request):
 
         for _ in range(len(QC_API_KEYS)):
             current_key = get_current_qc_key_for_model(requested_qc_model)
+            if not current_key:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": {"message": f"All QC keys are exhausted for model '{requested_qc_model}'."}},
+                )
             start_req_time = time.time()
             async with _borrow_upstream_client() as client:
                 resp = await client.post(
@@ -1012,7 +1026,9 @@ async def messages(request: Request):
                 True,
                 int((time.time() - start_req_time) * 1000),
             )
-            if resp.status_code in (401, 402, 403, 429) and rotate_qc_key_for_model(requested_qc_model):
+            if resp.status_code in _RETRYABLE_UPSTREAM_STATUSES and _rotate_qc_after_failure(
+                requested_qc_model, current_key, resp.status_code, data
+            ):
                 continue
             break
 
@@ -1037,7 +1053,6 @@ async def messages(request: Request):
 
                 context_window_hit = False
                 rotated_occurred = False
-                model_switched = False
 
                 for attempt in range(len(api_keys_to_use)):
                     if provider == "bm":
@@ -1052,6 +1067,11 @@ async def messages(request: Request):
                         current_key = get_current_marketku_key()
                     else:
                         current_key = get_current_bm_key()
+
+                    if provider == "qc" and not current_key:
+                        exhausted_error = f"All QC keys are exhausted for model '{requested_qc_model}'."
+                        yield f"event: error\ndata: {json.dumps(to_anthropic_stream_error(exhausted_error))}\n\n"
+                        return
 
                     headers["Authorization"] = f"Bearer {current_key}"
 
@@ -1089,30 +1109,10 @@ async def messages(request: Request):
                                     add_request_log(log_model, resp.status_code, current_key, True, int((time.time() - start_req_time) * 1000))
 
                                     if provider == "qc" and requested_qc_model:
-                                        mark_qc_model_exhausted(current_key, requested_qc_model)
-                                        if rotate_qc_key_for_model(requested_qc_model):
-                                            print(f"[LOG] QC model {requested_qc_model} exhausted on key, trying next key for same model")
-                                            continue
-                                        fallback = None
-                                        for m in QC_FALLBACK_ORDER:
-                                            if m != requested_qc_model and m in config_module.QWEN_CLOUD_MODELS and m not in avoided_qc_models:
-                                                if any(not config_module.is_qc_model_exhausted(k, m) for k in QC_API_KEYS):
-                                                    fallback = m
-                                                    break
-                                        if not fallback:
-                                            # Nothing outside the brain's avoid-list is available; fall
-                                            # back to it rather than failing the request outright.
-                                            for m in QC_FALLBACK_ORDER:
-                                                if m != requested_qc_model and m in config_module.QWEN_CLOUD_MODELS:
-                                                    if any(not config_module.is_qc_model_exhausted(k, m) for k in QC_API_KEYS):
-                                                        fallback = m
-                                                        break
-                                        if fallback:
-                                            print(f"[LOG] All QC keys exhausted for {requested_qc_model}, falling back to {fallback}")
-                                            requested_qc_model = fallback
-                                            upstream_req["model"] = fallback
-                                            log_model = f"qc/{fallback}"
-                                            model_switched = True
+                                        if _rotate_qc_after_failure(
+                                            requested_qc_model, current_key, resp.status_code, err_data
+                                        ):
+                                            print(f"[LOG] QC model {requested_qc_model} failed on key, trying next key for same model")
                                             continue
 
                                     if provider == "bm":
@@ -1122,7 +1122,7 @@ async def messages(request: Request):
                                     elif provider == "dahl":
                                         rotate_dahl_key()
                                     elif provider == "qc":
-                                        rotate_qc_key()
+                                        pass
                                     elif provider == "marketku":
                                         rotate_marketku_key()
                                     last_error_status = resp.status_code
@@ -1217,8 +1217,6 @@ async def messages(request: Request):
                                         rotate_bm_key(reason="Slow")
                                     elif provider == "nry":
                                         rotate_nr_key(reason="Slow")
-                                    elif provider == "qc":
-                                        rotate_qc_key_for_model(requested_qc_model)
                                     elif provider == "marketku":
                                         rotate_marketku_key()
                                 await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
@@ -1254,16 +1252,12 @@ async def messages(request: Request):
                             elif provider == "dahl":
                                 rotate_dahl_key()
                             elif provider == "qc":
-                                rotate_qc_key()
+                                rotate_qc_key_for_model(requested_qc_model, after_key=current_key)
                             elif provider == "marketku":
                                 rotate_marketku_key()
                             last_error_status = 500
                             last_error_content = {"error": str(e)}
                             await sse_broadcaster.broadcast("status", await _build_status_dict())
-
-                if model_switched:
-                    model_switched = False
-                    continue
 
                 if context_window_hit:
                     continue
@@ -1286,7 +1280,6 @@ async def messages(request: Request):
 
         context_window_hit = False
         rotated_occurred = False
-        model_switched = False
 
         for attempt in range(len(api_keys_to_use)):
             if provider == "bm":
@@ -1301,6 +1294,12 @@ async def messages(request: Request):
                 current_key = get_current_marketku_key()
             else:
                 current_key = get_current_bm_key()
+
+            if provider == "qc" and not current_key:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": {"message": f"All QC keys are exhausted for model '{requested_qc_model}'."}},
+                )
 
             headers["Authorization"] = f"Bearer {current_key}"
             for h in ("x-api-key", "anthropic-version"):
@@ -1335,32 +1334,10 @@ async def messages(request: Request):
                     add_request_log(log_model, resp.status_code, current_key, True, int((time.time() - start_req_time) * 1000))
 
                     if provider == "qc" and requested_qc_model:
-                        # Per-model key rotation: try next key for this model first.
-                        mark_qc_model_exhausted(current_key, requested_qc_model)
-                        if rotate_qc_key_for_model(requested_qc_model):
-                            print(f"[LOG] QC model {requested_qc_model} exhausted on key, trying next key for same model")
-                            continue
-                        # All keys exhausted for this model; try fallback model.
-                        fallback = None
-                        for m in QC_FALLBACK_ORDER:
-                            if m != requested_qc_model and m in config_module.QWEN_CLOUD_MODELS and m not in avoided_qc_models:
-                                if any(not config_module.is_qc_model_exhausted(k, m) for k in QC_API_KEYS):
-                                    fallback = m
-                                    break
-                        if not fallback:
-                            # Nothing outside the brain's avoid-list is available; fall
-                            # back to it rather than failing the request outright.
-                            for m in QC_FALLBACK_ORDER:
-                                if m != requested_qc_model and m in config_module.QWEN_CLOUD_MODELS:
-                                    if any(not config_module.is_qc_model_exhausted(k, m) for k in QC_API_KEYS):
-                                        fallback = m
-                                        break
-                        if fallback:
-                            print(f"[LOG] All QC keys exhausted for {requested_qc_model}, falling back to {fallback}")
-                            requested_qc_model = fallback
-                            upstream_req["model"] = fallback
-                            log_model = f"qc/{fallback}"
-                            model_switched = True
+                        if _rotate_qc_after_failure(
+                            requested_qc_model, current_key, resp.status_code, err_json
+                        ):
+                            print(f"[LOG] QC model {requested_qc_model} failed on key, trying next key for same model")
                             continue
 
                     if provider == "bm":
@@ -1370,7 +1347,7 @@ async def messages(request: Request):
                     elif provider == "dahl":
                         rotate_dahl_key()
                     elif provider == "qc":
-                        rotate_qc_key()
+                        pass
                     elif provider == "marketku":
                         rotate_marketku_key()
                     last_error_status = resp.status_code
@@ -1413,8 +1390,6 @@ async def messages(request: Request):
                         rotate_bm_key(reason="Slow")
                     elif provider == "nry":
                         rotate_nr_key(reason="Slow")
-                    elif provider == "qc":
-                        rotate_qc_key_for_model(requested_qc_model)
                     elif provider == "marketku":
                         rotate_marketku_key()
                     # Dahl upstream is inherently slow; don't rotate on slow total time
@@ -1451,17 +1426,12 @@ async def messages(request: Request):
                 elif provider == "dahl":
                     rotate_dahl_key()
                 elif provider == "qc":
-                    rotate_qc_key()
+                    rotate_qc_key_for_model(requested_qc_model, after_key=current_key)
                 elif provider == "marketku":
                     rotate_marketku_key()
                 last_error_status = 500
                 last_error_content = {"error": str(e)}
                 await sse_broadcaster.broadcast("status", await _build_status_dict())
-
-        # If we switched QC model due to exhaustion, re-scan from key index 0 for the new model
-        if model_switched:
-            model_switched = False
-            continue
 
         if context_window_hit:
             continue
@@ -1543,6 +1513,90 @@ def _aggregate_openai_sse(raw_text: str, fallback_model: str):
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": usage or {},
     }
+
+
+async def _relay_openai_upstream_stream(
+    resp: httpx.Response,
+    *,
+    requested_model: str,
+    display_model: str,
+    current_key: str,
+    provider: str,
+    started_at: float,
+    request: Request,
+):
+    """Relay an already-open upstream SSE response and account for usage."""
+    import re
+
+    should_strip = requested_model.endswith(("-thinking", "-agentic", "-thinking-agentic"))
+    buffer = ""
+    inside_thinking = False
+    token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+
+    try:
+        async for chunk in resp.aiter_bytes():
+            buffer += chunk.decode("utf-8", errors="ignore")
+            lines = buffer.split("\n")
+            buffer = lines.pop()
+
+            for line in lines:
+                if not line.startswith("data: "):
+                    yield f"{line}\n".encode("utf-8")
+                    continue
+
+                try:
+                    data = json.loads(line[6:])
+                except Exception:
+                    yield f"{line}\n".encode("utf-8")
+                    continue
+
+                usage = data.get("usage") or {}
+                if usage.get("prompt_tokens"):
+                    token_usage["prompt_tokens"] = usage["prompt_tokens"]
+                if usage.get("completion_tokens"):
+                    token_usage["completion_tokens"] = usage["completion_tokens"]
+
+                if should_strip and (data.get("choices") or []):
+                    delta = data["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        original = content
+                        if "<thinking>" in content:
+                            inside_thinking = True
+                        if "</thinking>" in content:
+                            inside_thinking = False
+                            content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL)
+                        elif inside_thinking or "<thinking>" in content:
+                            content = re.sub(r"<thinking>.*", "", content, flags=re.DOTALL)
+                        if original != content:
+                            logger.info("[STREAM] Stripped: %r -> %r", original, content)
+                        data["choices"][0]["delta"]["content"] = content
+                        if not content:
+                            continue
+
+                if data.get("model"):
+                    data["model"] = display_model
+                yield f"data: {json.dumps(data)}\n".encode("utf-8")
+
+        if buffer:
+            yield buffer.encode("utf-8")
+    finally:
+        await resp.aclose()
+        total_ms = int((time.time() - started_at) * 1000)
+        add_request_log(
+            requested_model,
+            200,
+            current_key,
+            False,
+            total_ms,
+            token_usage["prompt_tokens"],
+            token_usage["completion_tokens"],
+            provider=provider,
+        )
+        await _bill_router_key(
+            request, token_usage["prompt_tokens"] + token_usage["completion_tokens"]
+        )
+        await _broadcast_request_log()
 
 
 @router.post("/v1/chat/completions")
@@ -1717,8 +1771,8 @@ async def chat_completions(request: Request):
     elif provider == "qc":
         upstream_base_url = QWEN_CLOUD_BASE_URL
         api_keys_to_use = QC_API_KEYS
-        get_key = get_current_qc_key
-        rotate = rotate_qc_key
+        get_key = lambda: get_current_qc_key_for_model(upstream_model)
+        rotate = None
     elif provider == "marketku":
         upstream_base_url = MARKETKU_BASE_URL
         api_keys_to_use = MARKETKU_API_KEYS
@@ -1801,107 +1855,58 @@ async def chat_completions(request: Request):
 
     for attempt in range(len(api_keys_to_use)):
         current_key = get_key()
+        if provider == "qc" and not current_key:
+            return JSONResponse(
+                status_code=429,
+                content={"error": {"message": f"All QC keys are exhausted for model '{upstream_model}'."}},
+            )
         headers["Authorization"] = f"Bearer {current_key}"
         start_req_time = time.time()
 
         try:
             if payload.get("stream"):
                 print(f"[STREAM-INIT] Entering stream mode for model: {requested_model}, stream={payload.get('stream')}", flush=True)
+                client = _get_upstream_client()
+                upstream_request = client.build_request(
+                    "POST", upstream_endpoint, headers=headers, json=payload
+                )
+                resp = await client.send(upstream_request, stream=True)
+                if resp.status_code == 200:
+                    return StreamingResponse(
+                        _relay_openai_upstream_stream(
+                            resp,
+                            requested_model=requested_model,
+                            display_model=display_model,
+                            current_key=current_key,
+                            provider=provider,
+                            started_at=start_req_time,
+                            request=request,
+                        ),
+                        media_type="text/event-stream",
+                    )
 
-                async def stream_openai():
-                    import re
-                    should_strip = requested_model.endswith(("-thinking", "-agentic", "-thinking-agentic"))
-                    buffer = ""
-                    inside_thinking = False
-                    token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-
-                    print(f"[STREAM] Model: {requested_model}, should_strip: {should_strip}", flush=True)
-
-                    async with _borrow_upstream_client() as client:
-                        async with client.stream("POST", upstream_endpoint, headers=headers, json=payload) as resp:
-                            if resp.status_code != 200:
-                                error_text = (await resp.aread()).decode(errors="replace")
-                                yield f"data: {json.dumps({'error': {'message': error_text}})}\n\n"
-                                return
-
-                            async for chunk in resp.aiter_bytes():
-                                # Every chunk gets parsed, not just the ones we
-                                # strip thinking tags from: upstream names itself
-                                # in each chunk's `model`, and that has to be
-                                # swapped for the alias the same way the
-                                # non-streaming path does it below.
-                                buffer += chunk.decode('utf-8', errors='ignore')
-
-                                # Process complete lines
-                                lines = buffer.split('\n')
-                                buffer = lines[-1]  # Keep incomplete line in buffer
-
-                                for line in lines[:-1]:
-                                    if not line.startswith('data: '):
-                                        yield f"{line}\n".encode('utf-8')
-                                        continue
-
-                                    try:
-                                        data = json.loads(line[6:])
-                                    except Exception:
-                                        # [DONE] and anything unparseable relays untouched
-                                        yield f"{line}\n".encode('utf-8')
-                                        continue
-
-                                    # Capture usage from final chunk
-                                    usage = data.get('usage', {})
-                                    if usage.get('prompt_tokens'):
-                                        token_usage['prompt_tokens'] = usage['prompt_tokens']
-                                    if usage.get('completion_tokens'):
-                                        token_usage['completion_tokens'] = usage['completion_tokens']
-
-                                    if should_strip and (data.get('choices') or []):
-                                        delta = data['choices'][0].get('delta', {})
-                                        content = delta.get('content', '')
-
-                                        if content:
-                                            original = content
-                                            # Track thinking tag state
-                                            if '<thinking>' in content:
-                                                inside_thinking = True
-                                            if '</thinking>' in content:
-                                                inside_thinking = False
-                                                content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL)
-                                            elif inside_thinking or '<thinking>' in content:
-                                                content = re.sub(r'<thinking>.*', '', content, flags=re.DOTALL)
-
-                                            if original != content:
-                                                logger.info(f"[STREAM] Stripped: {repr(original)} -> {repr(content)}")
-
-                                            # Update content in response
-                                            data['choices'][0]['delta']['content'] = content
-                                            if not content:  # Nothing left after stripping
-                                                continue
-
-                                    if data.get('model'):
-                                        data['model'] = display_model
-
-                                    yield f"data: {json.dumps(data)}\n".encode('utf-8')
-
-                            # The line buffer would otherwise swallow a final
-                            # event that arrived without a trailing newline.
-                            if buffer:
-                                yield buffer.encode('utf-8')
-
-                            # Log request with token usage
-                            total_ms = int((time.time() - start_req_time) * 1000)
-                            add_request_log(
-                                requested_model, 200, current_key[:15], False, total_ms,
-                                token_usage['prompt_tokens'], token_usage['completion_tokens'],
-                                provider=provider
-                            )
-                            await _bill_router_key(
-                                request,
-                                token_usage['prompt_tokens'] + token_usage['completion_tokens'],
-                            )
-                            await _broadcast_request_log()
-
-                return StreamingResponse(stream_openai(), media_type="text/event-stream")
+                error_bytes = await resp.aread()
+                await resp.aclose()
+                try:
+                    content = json.loads(error_bytes)
+                except Exception:
+                    content = {"error": {"message": error_bytes.decode(errors="replace")}}
+                last_status = resp.status_code
+                last_content = content
+                add_request_log(
+                    requested_model,
+                    resp.status_code,
+                    current_key,
+                    True,
+                    int((time.time() - start_req_time) * 1000),
+                )
+                if resp.status_code in _RETRYABLE_UPSTREAM_STATUSES and attempt < len(api_keys_to_use) - 1:
+                    if provider == "qc":
+                        _rotate_qc_after_failure(upstream_model, current_key, resp.status_code, content)
+                    else:
+                        rotate()
+                    continue
+                return JSONResponse(status_code=resp.status_code, content=content)
 
             async with _borrow_upstream_client() as client:
                 resp = await client.post(upstream_endpoint, headers=headers, json=payload)
@@ -1973,8 +1978,11 @@ async def chat_completions(request: Request):
             last_status = effective_status
             last_content = content
             add_request_log(requested_model, effective_status, current_key, True, int((time.time() - start_req_time) * 1000))
-            if effective_status in (401, 402, 403, 404, 429, 500, 502, 503, 504) and attempt < len(api_keys_to_use) - 1:
-                rotate()
+            if effective_status in _RETRYABLE_UPSTREAM_STATUSES and attempt < len(api_keys_to_use) - 1:
+                if provider == "qc":
+                    _rotate_qc_after_failure(upstream_model, current_key, effective_status, content)
+                else:
+                    rotate()
                 continue
             return JSONResponse(status_code=effective_status, content=content)
         except Exception as e:
@@ -1982,7 +1990,10 @@ async def chat_completions(request: Request):
             last_content = {"error": {"message": str(e)}}
             add_request_log(requested_model, 500, current_key, True, int((time.time() - start_req_time) * 1000))
             if attempt < len(api_keys_to_use) - 1:
-                rotate()
+                if provider == "qc":
+                    rotate_qc_key_for_model(upstream_model, after_key=current_key)
+                else:
+                    rotate()
                 continue
             return JSONResponse(status_code=500, content=last_content)
 
