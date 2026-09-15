@@ -1,10 +1,12 @@
 import json
+import hmac
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 
@@ -33,6 +35,57 @@ from app.database import verify_router_api_key, add_router_key_token_usage
 
 
 router = APIRouter()
+MAX_REQUEST_BODY_BYTES = max(1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(25 * 1024 * 1024))))
+
+_UPSTREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+_CUSTOM_PROVIDER_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=15.0, pool=10.0)
+_HTTP_LIMITS = httpx.Limits(
+    max_connections=max(10, int(os.getenv("HTTP_MAX_CONNECTIONS", "200"))),
+    max_keepalive_connections=max(5, int(os.getenv("HTTP_MAX_KEEPALIVE_CONNECTIONS", "50"))),
+    keepalive_expiry=30.0,
+)
+_upstream_client: httpx.AsyncClient | None = None
+_custom_client: httpx.AsyncClient | None = None
+
+
+async def init_http_clients():
+    """Create process-wide pools so upstream TLS connections are reused."""
+    global _upstream_client, _custom_client
+    if _upstream_client is None or _upstream_client.is_closed:
+        _upstream_client = httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT, limits=_HTTP_LIMITS)
+    if _custom_client is None or _custom_client.is_closed:
+        _custom_client = httpx.AsyncClient(timeout=_CUSTOM_PROVIDER_TIMEOUT, limits=_HTTP_LIMITS)
+
+
+async def close_http_clients():
+    global _upstream_client, _custom_client
+    clients = [client for client in (_upstream_client, _custom_client) if client and not client.is_closed]
+    for client in clients:
+        await client.aclose()
+    _upstream_client = None
+    _custom_client = None
+
+
+def _get_upstream_client() -> httpx.AsyncClient:
+    if _upstream_client is None or _upstream_client.is_closed:
+        raise RuntimeError("Upstream HTTP client is not initialized")
+    return _upstream_client
+
+
+def _get_custom_client() -> httpx.AsyncClient:
+    if _custom_client is None or _custom_client.is_closed:
+        raise RuntimeError("Custom-provider HTTP client is not initialized")
+    return _custom_client
+
+
+@asynccontextmanager
+async def _borrow_upstream_client():
+    yield _get_upstream_client()
+
+
+@asynccontextmanager
+async def _borrow_custom_client():
+    yield _get_custom_client()
 
 
 async def _build_status_dict():
@@ -70,7 +123,7 @@ async def _check_router_auth(request: Request):
         return False
 
     # Check ROUTER_PASSWORD first (backward compatibility)
-    if ROUTER_PASSWORD and token == ROUTER_PASSWORD:
+    if ROUTER_PASSWORD and hmac.compare_digest(token, ROUTER_PASSWORD):
         return True
 
     # Check router API keys from database
@@ -84,6 +137,36 @@ async def _check_router_auth(request: Request):
         return True
 
     return False
+
+
+async def _read_json_payload(request: Request):
+    """Read a JSON object with an early size guard and client-safe errors."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                return None, JSONResponse(
+                    status_code=413,
+                    content={"error": {"message": "Request body is too large."}},
+                )
+        except ValueError:
+            return None, JSONResponse(
+                status_code=400,
+                content={"error": {"message": "Invalid Content-Length header."}},
+            )
+    try:
+        payload = await request.json()
+    except Exception:
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Request body must be valid JSON."}},
+        )
+    if not isinstance(payload, dict):
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Request body must be a JSON object."}},
+        )
+    return payload, None
 
 
 def _router_key(request: Request):
@@ -275,14 +358,32 @@ def _extract_cached_tokens(openai_resp: dict) -> int:
     return 0
 
 
+def _update_anthropic_stream_usage(event: dict, tracker: dict):
+    """Collect reported usage, with text length as a fallback for providers that omit it."""
+    usage = event.get("usage") or (event.get("message") or {}).get("usage") or {}
+    if usage.get("input_tokens") is not None:
+        tracker["input_tokens"] = int(usage["input_tokens"] or 0)
+    if usage.get("output_tokens") is not None:
+        tracker["output_tokens"] = int(usage["output_tokens"] or 0)
+    delta = event.get("delta") or {}
+    if isinstance(delta.get("text"), str):
+        tracker["output_chars"] += len(delta["text"])
+    if isinstance(delta.get("thinking"), str):
+        tracker["output_chars"] += len(delta["thinking"])
+
+
+def _final_stream_tokens(tracker: dict) -> tuple[int, int]:
+    output_tokens = tracker["output_tokens"]
+    if output_tokens <= 0 and tracker["output_chars"] > 0:
+        output_tokens = max(1, int(tracker["output_chars"] / 3.5))
+    return tracker["input_tokens"], output_tokens
+
+
 # A dead or unreachable custom-provider host used to hang for the full
 # 300s before failing -- long enough that Playground just looked frozen.
 # Connect fails fast (a live host completes TCP+TLS in well under this);
 # read stays generous since legitimate generation can genuinely take a
 # while.
-_CUSTOM_PROVIDER_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=15.0, pool=10.0)
-
-
 async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, display_model: str = None):
     """
     Send an Anthropic-shaped request to an admin-added custom provider and
@@ -326,7 +427,7 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
                 upstream_payload = dict(payload)
 
                 if not stream:
-                    async with httpx.AsyncClient(timeout=_CUSTOM_PROVIDER_TIMEOUT) as client:
+                    async with _borrow_custom_client() as client:
                         resp = await client.post(url, headers=headers, json=upstream_payload)
                     if resp.status_code == 200:
                         return "json", 200, resp.json()
@@ -336,7 +437,7 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
                         body = {"error": {"message": resp.text}}
                     last_status, last_body = resp.status_code, body
                 else:
-                    client = httpx.AsyncClient(timeout=_CUSTOM_PROVIDER_TIMEOUT)
+                    client = _get_custom_client()
                     req = client.build_request("POST", url, headers=headers, json=upstream_payload)
                     resp = await client.send(req, stream=True)
                     if resp.status_code == 200:
@@ -353,11 +454,9 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
                                 yield f"event: error\ndata: {json.dumps(to_anthropic_stream_error(str(e)))}\n\n"
                             finally:
                                 await resp.aclose()
-                                await client.aclose()
                         return "stream", 200, _relay()
                     body_bytes = await resp.aread()
                     await resp.aclose()
-                    await client.aclose()
                     try:
                         last_body = json.loads(body_bytes)
                     except Exception:
@@ -370,7 +469,7 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
                 upstream_payload["stream"] = stream
 
                 if not stream:
-                    async with httpx.AsyncClient(timeout=_CUSTOM_PROVIDER_TIMEOUT) as client:
+                    async with _borrow_custom_client() as client:
                         resp = await client.post(url, headers=headers, json=upstream_payload)
                     if resp.status_code == 200:
                         anthropic_resp = to_anthropic_response(resp.json(), shown_model, msg_id)
@@ -381,7 +480,7 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
                         body = {"error": {"message": resp.text}}
                     last_status, last_body = resp.status_code, body
                 else:
-                    client = httpx.AsyncClient(timeout=_CUSTOM_PROVIDER_TIMEOUT)
+                    client = _get_custom_client()
                     req = client.build_request("POST", url, headers=headers, json=upstream_payload)
                     resp = await client.send(req, stream=True)
                     if resp.status_code == 200:
@@ -414,17 +513,14 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
                                     yield f"event: error\ndata: {json.dumps(to_anthropic_stream_error(str(e)))}\n\n"
                                 finally:
                                     await resp.aclose()
-                                    await client.aclose()
                             return "stream", 200, _relay()
 
                         await agen.aclose()
                         await resp.aclose()
-                        await client.aclose()
                         last_status, last_body = 502, {"error": {"message": in_band_error}}
                     else:
                         body_bytes = await resp.aread()
                         await resp.aclose()
-                        await client.aclose()
                         try:
                             last_body = json.loads(body_bytes)
                         except Exception:
@@ -576,7 +672,12 @@ async def list_models(request: Request):
 
 @router.post("/v1/messages/count_tokens")
 @router.post("/v1/v1/messages/count_tokens")
-async def count_tokens(body: dict = Body(...)):
+async def count_tokens(request: Request):
+    if not await _check_router_auth(request):
+        return JSONResponse(status_code=401, content={"error": {"message": "Invalid API key."}})
+    body, error = await _read_json_payload(request)
+    if error:
+        return error
     tokens = estimate_tokens(body)
     return {"input_tokens": tokens}
 
@@ -587,7 +688,13 @@ async def messages(request: Request):
     if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": {"message": "Invalid router password."}})
 
-    payload = await request.json()
+    payload, error = await _read_json_payload(request)
+    if error:
+        return error
+    if not isinstance(payload.get("model"), str) or not payload["model"].strip():
+        return JSONResponse(status_code=400, content={"error": {"message": "A non-empty model is required."}})
+    if not isinstance(payload.get("messages"), list):
+        return JSONResponse(status_code=400, content={"error": {"message": "messages must be an array."}})
 
     # Custom (admin-added) providers get a self-contained dispatch path,
     # short-circuiting before any of the built-in routing/brain logic below.
@@ -617,10 +724,35 @@ async def messages(request: Request):
             elapsed_ms = int((time.time() - start_req_time) * 1000)
             if kind == "stream":
                 async def _wrapped():
-                    async for chunk in body:
-                        yield chunk
-                add_request_log(log_model, status, "custom", False, elapsed_ms, provider=cprefix)
-                await _broadcast_request_log()
+                    tracker = {
+                        "input_tokens": estimate_tokens(payload),
+                        "output_tokens": 0,
+                        "output_chars": 0,
+                    }
+                    buffer = ""
+                    try:
+                        async for chunk in body:
+                            text = chunk if isinstance(chunk, str) else chunk.decode(errors="ignore")
+                            buffer += text
+                            lines = buffer.split("\n")
+                            buffer = lines.pop()
+                            for line in lines:
+                                if not line.startswith("data: "):
+                                    continue
+                                try:
+                                    _update_anthropic_stream_usage(json.loads(line[6:]), tracker)
+                                except Exception:
+                                    pass
+                            yield chunk
+                    finally:
+                        input_tokens, output_tokens = _final_stream_tokens(tracker)
+                        add_request_log(
+                            log_model, status, "custom", False,
+                            int((time.time() - start_req_time) * 1000),
+                            input_tokens, output_tokens, provider=cprefix,
+                        )
+                        await _bill_router_key(request, input_tokens + output_tokens)
+                        await _broadcast_request_log()
                 return StreamingResponse(_wrapped(), media_type="text/event-stream")
             usage = (body or {}).get("usage") or {}
             input_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0) or 0
@@ -838,7 +970,7 @@ async def messages(request: Request):
         for _ in range(len(QC_API_KEYS)):
             current_key = get_current_qc_key_for_model(requested_qc_model)
             start_req_time = time.time()
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with _borrow_upstream_client() as client:
                 resp = await client.post(
                     image_endpoint,
                     headers={
@@ -916,7 +1048,7 @@ async def messages(request: Request):
                     headers["Authorization"] = f"Bearer {current_key}"
 
                     start_req_time = time.time()
-                    async with httpx.AsyncClient(timeout=300) as client:
+                    async with _borrow_upstream_client() as client:
                         try:
                             has_yielded = False
                             first_token_time = None
@@ -1168,7 +1300,7 @@ async def messages(request: Request):
 
             start_req_time = time.time()
             try:
-                async with httpx.AsyncClient(timeout=300) as client:
+                async with _borrow_upstream_client() as client:
                     resp = await client.post(
                         upstream_endpoint,
                         headers=headers,
@@ -1423,13 +1555,17 @@ async def chat_completions(request: Request):
         return JSONResponse(status_code=401, content={"error": {"message": "Invalid API key"}})
 
     try:
-        openai_payload = await request.json()
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": {"message": f"Invalid JSON: {str(e)}"}})
+        openai_payload, error = await _read_json_payload(request)
+        if error:
+            return error
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "Invalid request."}})
 
     payload = dict(openai_payload)
     requested_model, display_model = _resolve_alias(request, payload.get("model") or "bm/claude-3-5-sonnet-20241022")
     payload["model"] = requested_model
+    if not isinstance(payload.get("messages"), list):
+        return JSONResponse(status_code=400, content={"error": {"message": "messages must be an array."}})
     print(f"[CHAT-COMPLETIONS] Model: {requested_model}, stream: {payload.get('stream')}", flush=True)
 
     denied = _model_allowed_for_key(request, requested_model)
@@ -1465,13 +1601,14 @@ async def chat_completions(request: Request):
             kind, status, body = await _dispatch_custom_provider(cprefix, anthropic_payload, want_stream, display_model)
             log_model = f"{cprefix}/{model_name}"
             usage = (body or {}).get("usage") or {} if kind == "json" else {}
-            add_request_log(
-                log_model, status, "custom", False, int((time.time() - start_req_time) * 1000),
-                usage.get("input_tokens", 0) or 0, usage.get("output_tokens", 0) or 0,
-                provider=cprefix,
-            )
-            await _bill_router_key(request, (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0))
-            await _broadcast_request_log()
+            if kind == "json":
+                add_request_log(
+                    log_model, status, "custom", False, int((time.time() - start_req_time) * 1000),
+                    usage.get("input_tokens", 0) or 0, usage.get("output_tokens", 0) or 0,
+                    provider=cprefix,
+                )
+                await _bill_router_key(request, (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0))
+                await _broadcast_request_log()
 
             if status != 200:
                 return JSONResponse(status_code=status, content=body)
@@ -1486,26 +1623,42 @@ async def chat_completions(request: Request):
                 # a line split across two chunks doesn't get silently dropped.
                 convert = make_anthropic_to_openai_stream_converter(display_model)
                 buffer = ""
-                async for chunk in body:
-                    text = chunk if isinstance(chunk, str) else chunk.decode(errors="ignore")
-                    buffer += text
-                    lines = buffer.split("\n")
-                    buffer = lines.pop()
-                    for line in lines:
-                        line = line.strip()
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if data_str in ("[DONE]", ""):
-                            continue
-                        try:
-                            chunk_data = json.loads(data_str)
-                        except Exception:
-                            continue
-                        out = convert(chunk_data)
-                        if out:
-                            yield out.encode()
-                yield b"data: [DONE]\n\n"
+                tracker = {
+                    "input_tokens": estimate_tokens(anthropic_payload),
+                    "output_tokens": 0,
+                    "output_chars": 0,
+                }
+                try:
+                    async for chunk in body:
+                        text = chunk if isinstance(chunk, str) else chunk.decode(errors="ignore")
+                        buffer += text
+                        lines = buffer.split("\n")
+                        buffer = lines.pop()
+                        for line in lines:
+                            line = line.strip()
+                            if not line.startswith("data: "):
+                                continue
+                            data_str = line[6:].strip()
+                            if data_str in ("[DONE]", ""):
+                                continue
+                            try:
+                                chunk_data = json.loads(data_str)
+                            except Exception:
+                                continue
+                            _update_anthropic_stream_usage(chunk_data, tracker)
+                            out = convert(chunk_data)
+                            if out:
+                                yield out.encode()
+                    yield b"data: [DONE]\n\n"
+                finally:
+                    input_tokens, output_tokens = _final_stream_tokens(tracker)
+                    add_request_log(
+                        log_model, status, "custom", False,
+                        int((time.time() - start_req_time) * 1000),
+                        input_tokens, output_tokens, provider=cprefix,
+                    )
+                    await _bill_router_key(request, input_tokens + output_tokens)
+                    await _broadcast_request_log()
 
             return StreamingResponse(_relay_openai_stream(), media_type="text/event-stream")
 
@@ -1656,7 +1809,7 @@ async def chat_completions(request: Request):
 
                     print(f"[STREAM] Model: {requested_model}, should_strip: {should_strip}", flush=True)
 
-                    async with httpx.AsyncClient(timeout=300) as client:
+                    async with _borrow_upstream_client() as client:
                         async with client.stream("POST", upstream_endpoint, headers=headers, json=payload) as resp:
                             if resp.status_code != 200:
                                 error_text = (await resp.aread()).decode(errors="replace")
@@ -1734,10 +1887,15 @@ async def chat_completions(request: Request):
                                 token_usage['prompt_tokens'], token_usage['completion_tokens'],
                                 provider=provider
                             )
+                            await _bill_router_key(
+                                request,
+                                token_usage['prompt_tokens'] + token_usage['completion_tokens'],
+                            )
+                            await _broadcast_request_log()
 
                 return StreamingResponse(stream_openai(), media_type="text/event-stream")
 
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with _borrow_upstream_client() as client:
                 resp = await client.post(upstream_endpoint, headers=headers, json=payload)
 
             effective_status = resp.status_code
@@ -1795,6 +1953,7 @@ async def chat_completions(request: Request):
                 input_tokens = usage.get("prompt_tokens", 0) or 0
                 output_tokens = usage.get("completion_tokens", 0) or 0
                 add_request_log(requested_model, 200, current_key, False, int((time.time() - start_req_time) * 1000), input_tokens, output_tokens)
+                await _bill_router_key(request, input_tokens + output_tokens)
                 await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
                 await sse_broadcaster.broadcast("status", await _build_status_dict())
                 # Upstream reports its own model name; swap in the alias so the

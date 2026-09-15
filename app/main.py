@@ -45,24 +45,32 @@ async def _build_status_dict():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
-    await init_state_from_db()
-    print("[INIT] Database connected and state loaded")
+    await proxy.init_http_clients()
+    reset_task = None
+    try:
+        await init_db()
+        await init_state_from_db()
+        print("[INIT] Database connected and state loaded")
 
-    async def _auto_reset_loop():
-        while True:
-            await asyncio.sleep(60)
-            try:
-                reset = await auto_reset_limited_keys()
-                if reset:
-                    await sse_broadcaster.broadcast("status", await _build_status_dict())
-            except Exception as e:
-                print(f"[AUTO-RESET] Error: {e}")
+        async def _auto_reset_loop():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    reset = await auto_reset_limited_keys()
+                    if reset:
+                        await sse_broadcaster.broadcast("status", await _build_status_dict())
+                except Exception as e:
+                    print(f"[AUTO-RESET] Error: {e}")
 
-    asyncio.create_task(_auto_reset_loop())
-    yield
-    await close_db()
-    print("[INIT] Database connection closed")
+        reset_task = asyncio.create_task(_auto_reset_loop())
+        yield
+    finally:
+        if reset_task:
+            reset_task.cancel()
+            await asyncio.gather(reset_task, return_exceptions=True)
+        await proxy.close_http_clients()
+        await close_db()
+        print("[INIT] Database connection closed")
 
 
 app = FastAPI(lifespan=lifespan)

@@ -1,4 +1,5 @@
 import json
+import hmac
 import time
 from typing import AsyncGenerator
 
@@ -50,7 +51,7 @@ def _record_login_attempt(ip: str):
 
 
 async def require_auth(session_token: str = Cookie(default=None)):
-    if session_token != SESSION_SECRET:
+    if not session_token or not hmac.compare_digest(session_token, SESSION_SECRET):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
 
@@ -94,14 +95,14 @@ async def get_root():
 
 @router.get("/login", response_class=HTMLResponse)
 async def get_login(request: Request, session_token: str = Cookie(default=None)):
-    if session_token == SESSION_SECRET:
+    if session_token and hmac.compare_digest(session_token, SESSION_SECRET):
         return RedirectResponse(url="/dashboard", status_code=303)
     return templates.TemplateResponse(request=request, name="login.html")
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request, session_token: str = Cookie(default=None)):
-    if session_token != SESSION_SECRET:
+    if not session_token or not hmac.compare_digest(session_token, SESSION_SECRET):
         return RedirectResponse(url="/login", status_code=303)
     return templates.TemplateResponse(request=request, name="dashboard.html")
 

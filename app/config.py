@@ -3,9 +3,15 @@ import re
 import time
 import asyncio
 import hashlib
+import secrets
 import bcrypt
 from dotenv import load_dotenv
-from app.database import execute as db_execute, fetch as db_fetch, fetchrow as db_fetchrow
+from app.database import (
+    execute as db_execute,
+    fetch as db_fetch,
+    fetchrow as db_fetchrow,
+    persist_request_log,
+)
 
 load_dotenv()
 
@@ -126,12 +132,13 @@ else:
     if not _raw_password:
         raise ValueError("ADMIN_PASSWORD environment variable must be set on first run to generate hash.")
     ADMIN_PASSWORD_HASH = bcrypt.hashpw(_raw_password.encode(), bcrypt.gensalt())
-    _bcrypt_hash_str = ADMIN_PASSWORD_HASH.decode()
-    print(f"[SETUP] Generated bcrypt hash. Save this to ADMIN_PASSWORD_HASH env var:\n{_bcrypt_hash_str}")
+    print("[SECURITY] ADMIN_PASSWORD_HASH is not set; using an in-memory hash for this process.")
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "iyanadmin")
 
-SESSION_SECRET = hashlib.sha256(f"{ADMIN_USERNAME}:{os.getenv('ADMIN_PASSWORD', '')}:router-secret-v1".encode()).hexdigest()
+SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_urlsafe(48)
+if not os.getenv("SESSION_SECRET"):
+    print("[SECURITY] SESSION_SECRET is not set; generated an ephemeral secret for this process.")
 
 # In-memory state (primary for fast access, DB is persistence)
 BM_API_KEYS = []
@@ -789,17 +796,10 @@ def add_request_log(model, status_code, key_used, rotated, latency_ms, input_tok
     if len(recent_requests) > 20:
         recent_requests.pop()
     # Persist to DB
-    _bg(db_execute(
-        "INSERT INTO request_logs (model, status_code, key_prefix, rotated, latency_ms, input_tokens, output_tokens, cached_tokens, provider) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        model, status_code, log_item["key_used"], rotated, latency_ms, input_tokens, output_tokens, cached_tokens, provider
-    ))
-    _bg(db_execute(
-        "INSERT INTO server_config (key, value) VALUES ('total_requests', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        str(total_requests)
-    ))
-    _bg(db_execute(
-        "INSERT INTO server_config (key, value) VALUES ('total_tokens', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        str(total_tokens)
+    _bg(persist_request_log(
+        model, status_code, log_item["key_used"], rotated, latency_ms,
+        input_tokens, output_tokens, cached_tokens, provider,
+        total_requests, total_tokens,
     ))
 
 

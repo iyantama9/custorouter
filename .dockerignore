@@ -8,6 +8,7 @@ __pycache__/
 venv/
 env/
 ENV/
+**/node_modules/
 
 # IDEs
 .vscode/
@@ -33,6 +34,7 @@ export_neon_data.py
 # Code review
 .code-review-graph/
 .claude/
+claude-max-bridges/
 
 # Configs
 .opencode.json

@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+DB_POOL_MIN_SIZE = max(1, int(os.getenv("DB_POOL_MIN_SIZE", "2")))
+DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, int(os.getenv("DB_POOL_MAX_SIZE", "10")))
+DB_COMMAND_TIMEOUT = max(1.0, float(os.getenv("DB_COMMAND_TIMEOUT", "30")))
 
 _pool = None
 
@@ -12,7 +15,12 @@ async def init_db():
     global _pool
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable is not set")
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    _pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=DB_POOL_MIN_SIZE,
+        max_size=DB_POOL_MAX_SIZE,
+        command_timeout=DB_COMMAND_TIMEOUT,
+    )
     await setup_tables()
 
 async def close_db():
@@ -41,6 +49,36 @@ async def fetchrow(query, *args):
 
 async def fetch_one(query, *args):
     return await fetchrow(query, *args)
+
+
+async def persist_request_log(
+    model, status_code, key_prefix, rotated, latency_ms,
+    input_tokens, output_tokens, cached_tokens, provider,
+    total_requests, total_tokens,
+):
+    """Persist a request and its counter snapshot in one DB round-trip."""
+    await execute(
+        """
+        WITH inserted AS (
+            INSERT INTO request_logs
+                (model, status_code, key_prefix, rotated, latency_ms,
+                 input_tokens, output_tokens, cached_tokens, provider)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING 1
+        )
+        INSERT INTO server_config (key, value)
+        SELECT v.key, v.value
+        FROM inserted
+        CROSS JOIN (VALUES
+            ('total_requests', $10::text),
+            ('total_tokens', $11::text)
+        ) AS v(key, value)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        model, status_code, key_prefix, rotated, latency_ms,
+        input_tokens, output_tokens, cached_tokens, provider,
+        str(total_requests), str(total_tokens),
+    )
 
 async def get_lifetime_stats():
     """All-time request/token/rotation totals, computed straight from
@@ -470,9 +508,10 @@ async def append_to_session(session_id: int, role: str, content: str):
 
 async def cleanup_old_sessions(retention_days: int = 30):
     """Delete sessions older than retention_days."""
+    retention_days = max(1, int(retention_days))
     await execute(
-        "DELETE FROM chat_sessions WHERE updated_at < NOW() - INTERVAL '%s days'",
-        retention_days
+        "DELETE FROM chat_sessions WHERE updated_at < NOW() - make_interval(days => $1)",
+        retention_days,
     )
 
 # ── Router API Key Helpers ──
@@ -508,17 +547,18 @@ async def verify_router_api_key(key_value: str):
     allowlist and attribute token usage back to this key.
     """
     key = await fetchrow(
-        """SELECT id, token_quota, tokens_used, allowed_models, model_prompts, model_aliases, expires_at
-           FROM router_api_keys
+        """UPDATE router_api_keys
+           SET last_used_at = NOW()
            WHERE key_value = $1
              AND is_active = TRUE
              AND (expires_at IS NULL OR expires_at > NOW())
-             AND (token_quota = 0 OR tokens_used < token_quota)""",
+             AND (token_quota = 0 OR tokens_used < token_quota)
+           RETURNING id, token_quota, tokens_used, allowed_models,
+                     model_prompts, model_aliases, expires_at""",
         key_value
     )
     if not key:
         return None
-    await execute("UPDATE router_api_keys SET last_used_at = NOW() WHERE id = $1", key["id"])
     return dict(key)
 
 async def update_router_api_key(key_id: int, key_name: str, expires_at, token_quota: int,
