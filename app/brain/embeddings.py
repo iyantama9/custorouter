@@ -8,6 +8,9 @@ Uses FastEmbed with ONNX Runtime for local CPU embeddings (no API calls).
 import os
 import json
 import hashlib
+import asyncio
+import threading
+from collections import OrderedDict
 from typing import List, Optional
 import numpy as np
 
@@ -44,19 +47,22 @@ class FastEmbedEmbedding(EmbeddingProvider):
 
         self.model = TextEmbedding(model_name=model_name)
         self.dimension = 384
+        self._inference_lock = threading.Lock()
         print(f"[BRAIN] Loaded FastEmbed model: {model_name}")
 
     def embed_text(self, text: str) -> List[float]:
         """Embed a single text."""
         if not text.strip():
             return [0.0] * self.dimension
-        return next(self.model.embed([text])).tolist()
+        with self._inference_lock:
+            return next(self.model.embed([text])).tolist()
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Embed multiple texts in one ONNX inference stream."""
         if not texts:
             return []
-        return [embedding.tolist() for embedding in self.model.embed(texts)]
+        with self._inference_lock:
+            return [embedding.tolist() for embedding in self.model.embed(texts)]
 
 
 class SimpleEmbedding(EmbeddingProvider):
@@ -100,11 +106,13 @@ class SimpleEmbedding(EmbeddingProvider):
 
 
 class EmbeddingCache:
-    """Cache embeddings to avoid recomputation"""
+    """Thread-safe bounded LRU cache for embeddings."""
 
     def __init__(self, cache_file: str = ".brain_embedding_cache.json"):
         self.cache_file = cache_file
-        self.cache = {}
+        self.max_entries = max(100, int(os.getenv("EMBEDDING_CACHE_MAX_ENTRIES", "2048")))
+        self.cache = OrderedDict()
+        self._lock = threading.RLock()
         self._load_cache()
 
     def _load_cache(self):
@@ -112,38 +120,43 @@ class EmbeddingCache:
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    self.cache = json.load(f)
+                    loaded = json.load(f)
+                self.cache = OrderedDict(list(loaded.items())[-self.max_entries:])
                 print(f"[BRAIN] Loaded {len(self.cache)} cached embeddings")
             except Exception as e:
                 print(f"[BRAIN] Failed to load embedding cache: {e}")
-                self.cache = {}
-
-    def _save_cache(self):
-        """Save cache to disk"""
-        try:
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cache, f)
-        except Exception as e:
-            print(f"[BRAIN] Failed to save embedding cache: {e}")
+                self.cache = OrderedDict()
 
     def get(self, text: str) -> Optional[List[float]]:
         """Get cached embedding"""
-        text_hash = hashlib.md5(text.encode()).hexdigest()
-        return self.cache.get(text_hash)
+        text_hash = hashlib.sha256(text.encode()).hexdigest()
+        with self._lock:
+            embedding = self.cache.get(text_hash)
+            if embedding is None:
+                # Read caches written by older releases once, then migrate the
+                # entry to SHA-256 in memory.
+                legacy_hash = hashlib.md5(text.encode()).hexdigest()
+                embedding = self.cache.pop(legacy_hash, None)
+                if embedding is not None:
+                    self.cache[text_hash] = embedding
+            if embedding is not None:
+                self.cache.move_to_end(text_hash)
+            return embedding
 
     def set(self, text: str, embedding: List[float]):
         """Cache embedding"""
-        text_hash = hashlib.md5(text.encode()).hexdigest()
-        self.cache[text_hash] = embedding
-
-        # Save every 10 embeddings
-        if len(self.cache) % 10 == 0:
-            self._save_cache()
+        text_hash = hashlib.sha256(text.encode()).hexdigest()
+        with self._lock:
+            self.cache[text_hash] = embedding
+            self.cache.move_to_end(text_hash)
+            while len(self.cache) > self.max_entries:
+                self.cache.popitem(last=False)
 
 
 # Global embedding provider instance
 _embedding_provider: Optional[EmbeddingProvider] = None
 _embedding_cache: Optional[EmbeddingCache] = None
+_provider_lock = threading.Lock()
 
 
 def get_embedding_provider() -> EmbeddingProvider:
@@ -151,13 +164,15 @@ def get_embedding_provider() -> EmbeddingProvider:
     global _embedding_provider, _embedding_cache
 
     if _embedding_provider is None:
-        try:
-            _embedding_provider = FastEmbedEmbedding()
-        except Exception as e:
-            print(f"[BRAIN] Could not load FastEmbed: {e}")
-            _embedding_provider = SimpleEmbedding()
+        with _provider_lock:
+            if _embedding_provider is None:
+                try:
+                    _embedding_provider = FastEmbedEmbedding()
+                except Exception as e:
+                    print(f"[BRAIN] Could not load FastEmbed: {e}")
+                    _embedding_provider = SimpleEmbedding()
 
-        _embedding_cache = EmbeddingCache()
+                _embedding_cache = EmbeddingCache()
 
     return _embedding_provider
 
@@ -244,3 +259,13 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     """Calculate cosine similarity between two vectors"""
     provider = get_embedding_provider()
     return provider.similarity(vec1, vec2)
+
+
+async def embed_text_async(text: str, use_cache: bool = True) -> List[float]:
+    """Run CPU-heavy ONNX inference outside the asyncio event loop."""
+    return await asyncio.to_thread(embed_text, text, use_cache)
+
+
+async def embed_batch_async(texts: List[str], use_cache: bool = True) -> List[List[float]]:
+    """Batch embeddings in a worker thread so concurrent HTTP stays responsive."""
+    return await asyncio.to_thread(embed_batch, texts, use_cache)

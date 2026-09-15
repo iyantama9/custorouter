@@ -22,54 +22,14 @@
     })();
   </script>
 
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            background: 'hsl(var(--background))',
-            foreground: 'hsl(var(--foreground))',
-            card: 'hsl(var(--card))',
-            'card-foreground': 'hsl(var(--card-foreground))',
-            primary: 'hsl(var(--primary))',
-            'primary-foreground': 'hsl(var(--primary-foreground))',
-            secondary: 'hsl(var(--secondary))',
-            'secondary-foreground': 'hsl(var(--secondary-foreground))',
-            muted: 'hsl(var(--muted))',
-            'muted-foreground': 'hsl(var(--muted-foreground))',
-            accent: 'hsl(var(--accent))',
-            'accent-foreground': 'hsl(var(--accent-foreground))',
-            destructive: 'hsl(var(--destructive))',
-            'destructive-foreground': 'hsl(var(--destructive-foreground))',
-            success: 'hsl(var(--success))',
-            'success-foreground': 'hsl(var(--success-foreground))',
-            border: 'hsl(var(--border))',
-            input: 'hsl(var(--input))',
-            ring: 'hsl(var(--ring))',
-          },
-          fontFamily: {
-            display: ['"Syne"', 'sans-serif'],
-            body: ['"Outfit"', 'sans-serif'],
-            mono: ['"JetBrains Mono"', 'monospace'],
-          },
-          borderRadius: {
-            lg: 'var(--radius)',
-            md: 'calc(var(--radius) - 2px)',
-            sm: 'calc(var(--radius) - 4px)',
-          }
-        }
-      }
-    }
-  </script>
+  <link rel="stylesheet" href="/static/tailwind.min.css">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.17.3/dist/cdn.min.js"></script>
+  <script src="https://unpkg.com/lucide@1.46.0/dist/umd/lucide.min.js"></script>
 
   <style>
     :root {

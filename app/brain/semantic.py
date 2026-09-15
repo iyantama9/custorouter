@@ -5,7 +5,9 @@ Provides semantic search capabilities over conversation history.
 """
 
 from typing import List, Dict, Any, Optional
-from app.brain.embeddings import embed_text, cosine_similarity
+import asyncio
+
+from app.brain.embeddings import embed_text_async, embed_batch, cosine_similarity
 from app.brain.storage import BrainStorage
 
 
@@ -18,7 +20,8 @@ class SemanticSearch:
         api_key_hash: str,
         session_id: Optional[int] = None,
         limit: int = 10,
-        min_similarity: float = 0.3
+        min_similarity: float = 0.3,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search conversations by semantic similarity.
@@ -34,7 +37,8 @@ class SemanticSearch:
             List of matching conversations with similarity scores
         """
         # Embed the query
-        query_embedding = embed_text(query)
+        if query_embedding is None:
+            query_embedding = await embed_text_async(query)
 
         # Search in database
         results = await BrainStorage.search_conversations_by_embedding(
@@ -54,7 +58,8 @@ class SemanticSearch:
         message: str,
         api_key_hash: str,
         session_id: Optional[int] = None,
-        limit: int = 5
+        limit: int = 5,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Find related past conversations for a given message.
@@ -74,14 +79,16 @@ class SemanticSearch:
             api_key_hash=api_key_hash,
             session_id=session_id,
             limit=limit,
-            min_similarity=0.4  # Higher threshold for context injection
+            min_similarity=0.4,  # Higher threshold for context injection
+            query_embedding=query_embedding,
         )
 
     @staticmethod
     async def search_decisions(
         query: str,
         api_key_hash: str,
-        limit: int = 10
+        limit: int = 10,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search past decisions by semantic similarity.
@@ -94,8 +101,6 @@ class SemanticSearch:
         Returns:
             List of matching decisions
         """
-        from app.brain.embeddings import embed_text
-
         # Get all decisions
         decisions = await BrainStorage.get_decisions(
             api_key_hash=api_key_hash,
@@ -106,20 +111,18 @@ class SemanticSearch:
             return []
 
         # Embed query
-        query_embedding = embed_text(query)
+        if query_embedding is None:
+            query_embedding = await embed_text_async(query)
 
-        # Calculate similarity for each decision
-        results = []
-        for decision in decisions:
-            # Combine title + description for search
-            text = f"{decision.get('title', '')} {decision.get('description', '')}"
-            text_embedding = embed_text(text)
-            similarity = cosine_similarity(query_embedding, text_embedding)
+        def _score_decisions():
+            texts = [f"{d.get('title', '')} {d.get('description', '')}" for d in decisions]
+            embeddings = embed_batch(texts)
+            return [
+                {**decision, "similarity": cosine_similarity(query_embedding, embedding)}
+                for decision, embedding in zip(decisions, embeddings)
+            ]
 
-            results.append({
-                **decision,
-                "similarity": similarity
-            })
+        results = await asyncio.to_thread(_score_decisions)
 
         # Sort by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)
@@ -134,7 +137,8 @@ class SemanticSearch:
         query: str,
         api_key_hash: str,
         category: Optional[str] = None,
-        limit: int = 10
+        limit: int = 10,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search facts by semantic similarity.
@@ -148,8 +152,6 @@ class SemanticSearch:
         Returns:
             List of matching facts
         """
-        from app.brain.embeddings import embed_text
-
         # Get all facts
         facts = await BrainStorage.get_facts(
             api_key_hash=api_key_hash,
@@ -161,19 +163,17 @@ class SemanticSearch:
             return []
 
         # Embed query
-        query_embedding = embed_text(query)
+        if query_embedding is None:
+            query_embedding = await embed_text_async(query)
 
-        # Calculate similarity for each fact
-        results = []
-        for fact in facts:
-            fact_text = fact.get('fact', '')
-            fact_embedding = embed_text(fact_text)
-            similarity = cosine_similarity(query_embedding, fact_embedding)
+        def _score_facts():
+            embeddings = embed_batch([fact.get('fact', '') for fact in facts])
+            return [
+                {**fact, "similarity": cosine_similarity(query_embedding, embedding)}
+                for fact, embedding in zip(facts, embeddings)
+            ]
 
-            results.append({
-                **fact,
-                "similarity": similarity
-            })
+        results = await asyncio.to_thread(_score_facts)
 
         # Sort by similarity and confidence
         results.sort(key=lambda x: (x["similarity"] * x.get("confidence", 1.0)), reverse=True)

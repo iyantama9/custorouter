@@ -54,30 +54,17 @@ async def fetch_one(query, *args):
 async def persist_request_log(
     model, status_code, key_prefix, rotated, latency_ms,
     input_tokens, output_tokens, cached_tokens, provider,
-    total_requests, total_tokens,
 ):
-    """Persist a request and its counter snapshot in one DB round-trip."""
+    """Persist one request log without adding counter writes to the hot path."""
     await execute(
         """
-        WITH inserted AS (
-            INSERT INTO request_logs
-                (model, status_code, key_prefix, rotated, latency_ms,
-                 input_tokens, output_tokens, cached_tokens, provider)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING 1
-        )
-        INSERT INTO server_config (key, value)
-        SELECT v.key, v.value
-        FROM inserted
-        CROSS JOIN (VALUES
-            ('total_requests', $10::text),
-            ('total_tokens', $11::text)
-        ) AS v(key, value)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        INSERT INTO request_logs
+            (model, status_code, key_prefix, rotated, latency_ms,
+             input_tokens, output_tokens, cached_tokens, provider)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """,
         model, status_code, key_prefix, rotated, latency_ms,
         input_tokens, output_tokens, cached_tokens, provider,
-        str(total_requests), str(total_tokens),
     )
 
 async def get_lifetime_stats():
@@ -367,6 +354,39 @@ async def setup_tables():
         ON brain_profiles(api_key_hash)
     """)
 
+    # Older get-then-insert session creation could race under concurrent first
+    # messages. Merge any duplicates before enforcing the invariant in SQL.
+    await execute("""
+        DO $$
+        DECLARE duplicate RECORD;
+        BEGIN
+            FOR duplicate IN
+                SELECT id, MIN(id) OVER (
+                    PARTITION BY project_identifier, api_key_hash
+                ) AS keeper_id
+                FROM chat_sessions
+                WHERE project_identifier IS NOT NULL
+            LOOP
+                IF duplicate.id <> duplicate.keeper_id THEN
+                    UPDATE chat_messages SET session_id = duplicate.keeper_id
+                    WHERE session_id = duplicate.id;
+                    UPDATE brain_conversations SET session_id = duplicate.keeper_id
+                    WHERE session_id = duplicate.id;
+                    UPDATE brain_decisions SET session_id = duplicate.keeper_id
+                    WHERE session_id = duplicate.id;
+                    UPDATE brain_facts SET session_id = duplicate.keeper_id
+                    WHERE session_id = duplicate.id;
+                    DELETE FROM chat_sessions WHERE id = duplicate.id;
+                END IF;
+            END LOOP;
+        END $$
+    """)
+    await execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_unique_identifier
+        ON chat_sessions(project_identifier, api_key_hash)
+        WHERE project_identifier IS NOT NULL
+    """)
+
     # ── Router API Keys ──
     await execute("""
         CREATE TABLE IF NOT EXISTS router_api_keys (
@@ -464,30 +484,21 @@ async def save_chat_message(session_id: int, role: str, content: str):
 
 # ── Conversation Memory Helpers ──
 async def get_or_create_session(identifier: str, api_key_hash: str, model: str = None):
-    """Get existing session by identifier or create new one."""
-    # Try to find existing session
-    session = await fetchrow(
-        "SELECT id FROM chat_sessions WHERE project_identifier = $1 AND api_key_hash = $2",
-        identifier, api_key_hash
-    )
-    if session:
-        # Update last seen
-        if model:
-            await execute(
-                "UPDATE chat_sessions SET updated_at = NOW(), last_model = $1 WHERE id = $2",
-                model, session["id"]
-            )
-        else:
-            await execute("UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1", session["id"])
-        return session["id"]
-
-    # Create new session
+    """Atomically get or create a stable API session in one round-trip."""
     name = f"Session {identifier[:8]}"
-    new_session = await fetchrow(
-        "INSERT INTO chat_sessions (name, project_identifier, api_key_hash, last_model) VALUES ($1, $2, $3, $4) RETURNING id",
+    session = await fetchrow(
+        """INSERT INTO chat_sessions
+               (name, project_identifier, api_key_hash, last_model)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (project_identifier, api_key_hash)
+               WHERE project_identifier IS NOT NULL
+           DO UPDATE SET
+               updated_at = NOW(),
+               last_model = COALESCE(EXCLUDED.last_model, chat_sessions.last_model)
+           RETURNING id""",
         name, identifier, api_key_hash, model
     )
-    return new_session["id"]
+    return session["id"]
 
 async def load_session_history(session_id: int, limit: int = 20):
     """Load N most recent messages from a session in chronological order."""

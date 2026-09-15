@@ -7,11 +7,13 @@ Handles:
 - Relevant memory retrieval
 """
 
+import asyncio
 import json
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 from app.brain.storage import BrainStorage
 from app.brain.semantic import SemanticSearch
-from app.brain.embeddings import embed_text
+from app.brain.embeddings import embed_text_async
 
 
 class MemoryManager:
@@ -45,7 +47,7 @@ class MemoryManager:
         # Compute embedding if requested
         embedding = None
         if compute_embedding and text_content.strip():
-            embedding = embed_text(text_content)
+            embedding = await embed_text_async(text_content)
 
         # Save to database
         await BrainStorage.save_conversation_embedding(
@@ -114,12 +116,25 @@ class MemoryManager:
             "decisions": []
         }
 
-        # Find relevant past conversations
-        relevant = await SemanticSearch.find_related_conversations(
-            message=current_message,
-            api_key_hash=api_key_hash,
-            session_id=None,  # Search across all sessions for broader context
-            limit=max_relevant
+        # Compute the query vector once, then run independent DB lookups in
+        # parallel. Previously the same ONNX inference ran three times.
+        query_embedding = await embed_text_async(current_message)
+        relevant_task = SemanticSearch.find_related_conversations(
+            message=current_message, api_key_hash=api_key_hash,
+            session_id=None, limit=max_relevant,
+            query_embedding=query_embedding,
+        )
+        facts_task = SemanticSearch.search_facts(
+            query=current_message, api_key_hash=api_key_hash, limit=5,
+            query_embedding=query_embedding,
+        ) if include_facts else asyncio.sleep(0, result=[])
+        decisions_task = SemanticSearch.search_decisions(
+            query=current_message, api_key_hash=api_key_hash, limit=3,
+            query_embedding=query_embedding,
+        ) if include_decisions else asyncio.sleep(0, result=[])
+
+        relevant, facts, decisions = await asyncio.gather(
+            relevant_task, facts_task, decisions_task
         )
 
         # Filter out current session to avoid duplicates
@@ -128,23 +143,8 @@ class MemoryManager:
 
         context["relevant_conversations"] = relevant[:max_relevant]
 
-        # Find relevant facts
-        if include_facts:
-            facts = await SemanticSearch.search_facts(
-                query=current_message,
-                api_key_hash=api_key_hash,
-                limit=5
-            )
-            context["facts"] = facts
-
-        # Find relevant decisions
-        if include_decisions:
-            decisions = await SemanticSearch.search_decisions(
-                query=current_message,
-                api_key_hash=api_key_hash,
-                limit=3
-            )
-            context["decisions"] = decisions
+        context["facts"] = facts
+        context["decisions"] = decisions
 
         return context
 

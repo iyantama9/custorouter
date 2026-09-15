@@ -7,7 +7,9 @@ class SSEBroadcaster:
         self._queues: set = set()
 
     def connect(self) -> asyncio.Queue:
-        q = asyncio.Queue()
+        # Bound per-dashboard buffering so a suspended browser tab cannot grow
+        # server memory indefinitely under heavy router traffic.
+        q = asyncio.Queue(maxsize=100)
         self._queues.add(q)
         return q
 
@@ -21,7 +23,13 @@ class SSEBroadcaster:
             try:
                 q.put_nowait(data)
             except asyncio.QueueFull:
-                dead.add(q)
+                # Status/log events are snapshots; keep the newest data rather
+                # than disconnecting a client and leaving it waiting forever.
+                try:
+                    q.get_nowait()
+                    q.put_nowait(data)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    dead.add(q)
         for q in dead:
             self.disconnect(q)
 

@@ -2,14 +2,13 @@ import json
 
 from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
-import httpx
-
 from app.config import ROUTER_PASSWORD, PORT
 from app.database import (
     get_chat_sessions, get_chat_messages, create_chat_session,
     update_chat_session, delete_chat_session, save_chat_message,
 )
 from app.routers.admin import require_auth
+from app.routers.proxy import get_shared_http_client
 
 
 router = APIRouter()
@@ -73,54 +72,60 @@ async def api_playground_chat(request: Request, user: None = Depends(require_aut
 
         async def stream_generator():
             full_reply = ""
-            async with httpx.AsyncClient() as client:
-                async with client.stream("POST", url, headers=headers, json=payload, timeout=300.0) as response:
-                    # A StreamingResponse commits to 200 before the router has
-                    # answered, so an upstream failure has to be handed to the
-                    # browser as an SSE error event. Re-raising instead would
-                    # abort the response mid-body and surface in the Playground
-                    # as an unexplained "Failed to fetch".
-                    if response.status_code != 200:
-                        raw = (await response.aread()).decode(errors="replace")
-                        try:
-                            parsed = json.loads(raw)
-                            message = (parsed.get("error") or {}).get("message") or raw
-                        except Exception:
-                            message = raw
-                        yield _sse_error(message or f"HTTP {response.status_code}")
-                        return
-
+            buffer = ""
+            client = get_shared_http_client()
+            async with client.stream("POST", url, headers=headers, json=payload, timeout=300.0) as response:
+                # A StreamingResponse commits to 200 before the router has
+                # answered, so an upstream failure has to be handed to the
+                # browser as an SSE error event.
+                if response.status_code != 200:
+                    raw = (await response.aread()).decode(errors="replace")
                     try:
-                        async for chunk in response.aiter_raw():
-                            yield chunk
+                        parsed = json.loads(raw)
+                        message = (parsed.get("error") or {}).get("message") or raw
+                    except Exception:
+                        message = raw
+                    yield _sse_error(message or f"HTTP {response.status_code}")
+                    return
+
+                try:
+                    async for chunk in response.aiter_raw():
+                        yield chunk
+                        buffer += chunk.decode('utf-8', errors='ignore')
+                        lines = buffer.split('\n')
+                        buffer = lines.pop()
+                        for line in lines:
+                            if not line.startswith('data: ') or line == 'data: [DONE]':
+                                continue
                             try:
-                                decoded = chunk.decode('utf-8')
-                                for line in decoded.split('\n'):
-                                    if line.startswith('data: ') and line != 'data: [DONE]':
-                                        d = json.loads(line[6:])
-                                        if d.get("choices") and d["choices"][0].get("delta", {}).get("content"):
-                                            full_reply += d["choices"][0]["delta"]["content"]
-                                        elif d.get("type") == "content_block_delta" and d.get("delta", {}).get("text"):
-                                            full_reply += d["delta"]["text"]
+                                d = json.loads(line[6:])
+                                if d.get("choices") and d["choices"][0].get("delta", {}).get("content"):
+                                    full_reply += d["choices"][0]["delta"]["content"]
+                                elif d.get("type") == "content_block_delta" and d.get("delta", {}).get("text"):
+                                    full_reply += d["delta"]["text"]
                             except Exception:
                                 pass
-                    except Exception as e:
-                        yield _sse_error(f"{type(e).__name__}: {e}")
+                except Exception as e:
+                    print(f"[PLAYGROUND] Stream failed: {type(e).__name__}: {e}")
+                    yield _sse_error("The upstream stream ended unexpectedly.")
 
             if session_id and full_reply:
                 await save_chat_message(session_id, "assistant", full_reply)
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json=payload, timeout=300.0)
+        client = get_shared_http_client()
+        resp = await client.post(url, headers=headers, json=payload, timeout=300.0)
+        try:
             data = resp.json()
-            reply_text = ""
-            if "choices" in data and data["choices"]:
-                reply_text = data["choices"][0].get("message", {}).get("content", "")
-            elif "content" in data and isinstance(data["content"], list):
-                reply_text = "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
+        except Exception:
+            data = {"error": {"message": "Router returned an invalid response."}}
+        reply_text = ""
+        if "choices" in data and data["choices"]:
+            reply_text = data["choices"][0].get("message", {}).get("content", "")
+        elif "content" in data and isinstance(data["content"], list):
+            reply_text = "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
 
-            if session_id and reply_text:
-                await save_chat_message(session_id, "assistant", reply_text)
-            return JSONResponse(content=data, status_code=resp.status_code)
+        if session_id and reply_text:
+            await save_chat_message(session_id, "assistant", reply_text)
+        return JSONResponse(content=data, status_code=resp.status_code)

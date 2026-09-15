@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import database
 from app.routers import proxy
+from app.sse import SSEBroadcaster
 
 
 class HttpClientLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -51,6 +52,30 @@ class DatabaseHotPathTests(unittest.IsolatedAsyncioTestCase):
         query, days = execute.await_args.args
         self.assertIn("make_interval(days => $1)", query)
         self.assertEqual(days, 14)
+
+    async def test_session_upsert_is_atomic_and_single_round_trip(self):
+        with patch.object(database, "fetchrow", AsyncMock(return_value={"id": 42})) as fetchrow:
+            session_id = await database.get_or_create_session("project", "hash", "model")
+
+        self.assertEqual(session_id, 42)
+        fetchrow.assert_awaited_once()
+        query = fetchrow.await_args.args[0]
+        self.assertIn("ON CONFLICT", query)
+        self.assertIn("RETURNING id", query)
+
+
+class SSEBackpressureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_client_queue_is_bounded_and_keeps_newest_event(self):
+        broadcaster = SSEBroadcaster()
+        queue = broadcaster.connect()
+        for value in range(150):
+            await broadcaster.broadcast("status", {"value": value})
+
+        self.assertEqual(queue.qsize(), 100)
+        newest = None
+        while not queue.empty():
+            newest = await queue.get()
+        self.assertIn('"value": 149', newest)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 import json
 import hmac
+import logging
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -12,7 +12,7 @@ import httpx
 
 import app.config as config_module
 from app.config import (
-    DEFAULT_UPSTREAM_URL, BLUESMINDS_API_KEY, BLUESMINDS_BASE_URL,
+    BLUESMINDS_API_KEY, BLUESMINDS_BASE_URL,
     ROUTER_PASSWORD, NARA_BASE_URL, DAHL_BASE_URL, QWEN_CLOUD_BASE_URL, MARKETKU_BASE_URL,
     resolve_dahl_model, BM_API_KEYS, NR_API_KEYS, DAHL_API_KEYS, QC_API_KEYS, MARKETKU_API_KEYS,
     get_current_bm_key, rotate_bm_key, get_current_nr_key, rotate_nr_key, get_current_dahl_key, rotate_dahl_key, get_current_qc_key, rotate_qc_key, get_current_marketku_key, rotate_marketku_key,
@@ -28,6 +28,9 @@ from app.translator_openai import (
     openai_tools_to_anthropic, openai_tool_choice_to_anthropic,
 )
 from app.sse import sse_broadcaster
+
+
+logger = logging.getLogger(__name__)
 from app.brain.middleware import BrainMiddleware
 from app.brain.memory import MemoryManager
 from app.brain.storage import BrainStorage
@@ -70,6 +73,11 @@ def _get_upstream_client() -> httpx.AsyncClient:
     if _upstream_client is None or _upstream_client.is_closed:
         raise RuntimeError("Upstream HTTP client is not initialized")
     return _upstream_client
+
+
+def get_shared_http_client() -> httpx.AsyncClient:
+    """Shared client for same-process helpers such as the Playground proxy."""
+    return _get_upstream_client()
 
 
 def _get_custom_client() -> httpx.AsyncClient:

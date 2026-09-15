@@ -1,5 +1,7 @@
 import json
 import hmac
+import ipaddress
+import os
 import time
 from typing import AsyncGenerator
 
@@ -13,7 +15,7 @@ import asyncio
 import app.config as config_module
 from app.config import (
     BLUESMINDS_BASE_URL, NARA_BASE_URL, DAHL_BASE_URL,
-    QWEN_CLOUD_BASE_URL, MARKETKU_BASE_URL, ROUTER_PASSWORD,
+    QWEN_CLOUD_BASE_URL, MARKETKU_BASE_URL,
     recent_requests,
     add_api_key, remove_api_key, bulk_remove_api_keys, reset_key_status, get_masked_keys, set_active_key,
     add_custom_provider, remove_provider,
@@ -22,7 +24,7 @@ from app.config import (
 from app.sse import sse_broadcaster
 from app.database import (
     fetch, fetch_one, create_router_api_key, get_router_api_keys, delete_router_api_key,
-    update_router_api_key, reset_router_key_usage, get_lifetime_stats,
+    update_router_api_key, reset_router_key_usage,
 )
 
 
@@ -33,6 +35,17 @@ templates = Jinja2Templates(directory="templates")
 _login_attempts: dict[str, list[float]] = {}
 _LOGIN_MAX_ATTEMPTS = 10
 _LOGIN_WINDOW_SECONDS = 60
+_TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
+
+
+def _client_ip(request: Request) -> str:
+    if _TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        try:
+            return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    return request.client.host if request.client else "unknown"
 
 
 def _check_login_rate_limit(ip: str) -> bool:
@@ -63,20 +76,13 @@ async def _build_status_dict():
     uptime_str = f"{hours}h {minutes}m {seconds}s"
     _all_keys = get_masked_keys()
     available_keys = sum(1 for k in _all_keys if k['status'] in ('Active', 'Standby'))
-    # total_requests/total_tokens/failover_count in config_module are
-    # in-memory counters that reset to 0 on every process restart -- they
-    # get written to server_config on every request but were never read
-    # back at startup, so the dashboard looked "reset" after every deploy
-    # even though request_logs itself never lost a row. Read the real
-    # lifetime totals straight from the log table instead.
-    lifetime = await get_lifetime_stats()
     return {
         "status": "online",
         "uptime": uptime_str,
         "uptime_seconds": uptime_seconds,
-        "total_requests": lifetime["total_requests"],
-        "failover_count": lifetime["total_rotations"],
-        "total_tokens": lifetime["total_tokens"],
+        "total_requests": config_module.total_requests,
+        "failover_count": config_module.failover_count,
+        "total_tokens": config_module.total_tokens,
         "available_keys": available_keys,
         "total_keys": len(_all_keys),
         "keys": _all_keys,
@@ -109,16 +115,23 @@ async def get_dashboard(request: Request, session_token: str = Cookie(default=No
 
 @router.post("/api/login")
 async def api_login(request: Request, payload: dict = Body(...)):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     if not _check_login_rate_limit(client_ip):
         return JSONResponse(status_code=429, content={"success": False, "message": "Too many login attempts. Try again later."})
     username = payload.get("username", "")
     password = payload.get("password", "")
-    if username == ADMIN_USERNAME and verify_admin_password(password):
+    if not isinstance(username, str) or not isinstance(password, str) or len(username) > 100 or len(password) > 1024:
+        _record_login_attempt(client_ip)
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid credentials"})
+    # bcrypt is intentionally expensive; run it outside the event loop so a
+    # login attempt cannot pause proxy traffic for every other client.
+    password_ok = await asyncio.to_thread(verify_admin_password, password)
+    if hmac.compare_digest(username, ADMIN_USERNAME) and password_ok:
+        _login_attempts.pop(client_ip, None)
         return JSONResponse(
             content={"success": True},
             headers={
-                "Set-Cookie": f"session_token={SESSION_SECRET}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000"
+                "Set-Cookie": f"session_token={SESSION_SECRET}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000; Priority=High"
             }
         )
     _record_login_attempt(client_ip)

@@ -10,6 +10,7 @@ from app.database import (
     execute as db_execute,
     fetch as db_fetch,
     fetchrow as db_fetchrow,
+    get_lifetime_stats,
     persist_request_log,
 )
 
@@ -223,6 +224,13 @@ async def init_state_from_db():
         CUSTOM_PROVIDER_KEYS[row["prefix"]] = []
     DISABLED_PROVIDERS = await get_disabled_providers()
 
+    # Restore counters once at startup. Dashboard status can then stay on the
+    # in-memory fast path instead of aggregating the whole log table per poll.
+    lifetime = await get_lifetime_stats()
+    total_requests = int(lifetime["total_requests"])
+    total_tokens = int(lifetime["total_tokens"])
+    failover_count = int(lifetime["total_rotations"])
+
     # Load keys from DB
     rows = await db_fetch("SELECT key_value, key_prefix, status, provider FROM api_keys ORDER BY id")
     if rows:
@@ -387,27 +395,6 @@ async def auto_reset_limited_keys():
     if reset_keys:
         print(f"[AUTO-RESET] Auto-reset {len(reset_keys)} Limited key(s) to Standby: {reset_keys}")
     return reset_keys
-
-
-def get_current_key():
-    if not API_KEYS:
-        return ""
-    return API_KEYS[current_key_index]
-
-
-def rotate_key(reason: str = "Limited"):
-    global current_key_index, failover_count
-    if len(API_KEYS) <= 1:
-        return get_current_key()
-    current_key_index = (current_key_index + 1) % len(API_KEYS)
-    new_key = get_current_key()
-    key_statuses[new_key] = "Active"
-    failover_count += 1
-    print(f"[LOG] Rotated kc key → index {current_key_index}: {new_key[:15]}... (reason: {reason})")
-    _bg(db_execute("UPDATE api_keys SET status = 'Active' WHERE key_value = $1", new_key))
-    _bg(db_execute("INSERT INTO server_config (key, value) VALUES ('failover_count', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", str(failover_count)))
-    return new_key
-
 
 
 def get_current_bm_key():
@@ -799,7 +786,6 @@ def add_request_log(model, status_code, key_used, rotated, latency_ms, input_tok
     _bg(persist_request_log(
         model, status_code, log_item["key_used"], rotated, latency_ms,
         input_tokens, output_tokens, cached_tokens, provider,
-        total_requests, total_tokens,
     ))
 
 

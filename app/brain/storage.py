@@ -9,6 +9,7 @@ Handles:
 """
 
 import json
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from app.database import execute, fetch, fetchrow, setup_tables
@@ -105,16 +106,20 @@ class BrainStorage:
 
         # Calculate similarity in Python (fallback)
         from app.brain.embeddings import cosine_similarity
-        results = []
-        for row in rows:
-            embedding = row["embedding"]
-            if isinstance(embedding, str):
-                embedding = json.loads(embedding)
-            similarity = cosine_similarity(query_embedding, embedding)
-            results.append({
-                **_serialize_row(row),
-                "similarity": similarity
-            })
+        def _score_rows():
+            results = []
+            for row in rows:
+                embedding = row["embedding"]
+                if isinstance(embedding, str):
+                    embedding = json.loads(embedding)
+                similarity = cosine_similarity(query_embedding, embedding)
+                results.append({
+                    **_serialize_row(row),
+                    "similarity": similarity
+                })
+            return results
+
+        results = await asyncio.to_thread(_score_rows)
 
         # Sort by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)

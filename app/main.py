@@ -13,10 +13,14 @@
 
 import asyncio
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.database import init_db, close_db
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
@@ -74,6 +78,49 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+
+
+@app.middleware("http")
+async def security_and_observability_headers(request, call_next):
+    started = time.perf_counter()
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+
+    # Cookie-authenticated admin mutations must originate from this site.
+    # Bearer-authenticated proxy APIs are unaffected.
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path.startswith("/api/")
+        and request.cookies.get("session_token")
+    ):
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse(status_code=403, content={"error": "Cross-site request blocked."})
+        origin = request.headers.get("origin")
+        if origin:
+            host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+            allowed_origins = {f"https://{host}", f"http://{host}"}
+            if origin.rstrip("/") not in allowed_origins:
+                return JSONResponse(status_code=403, content={"error": "Invalid request origin."})
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.1f}"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
+        "https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; "
+        "connect-src 'self' https:"
+    )
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if request.url.path.startswith("/api/") or request.url.path in ("/dashboard", "/login"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

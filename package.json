@@ -1,0 +1,10 @@
+{
+  "name": "custorouter-dashboard",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i assets/tailwind.css -o static/tailwind.min.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

@@ -1749,6 +1749,9 @@ function dashboard() {
     _routingRefreshTimer: null,
     _sse: null,
     _poll: null,
+    _statusPending: false,
+    _logsController: null,
+    _visibilityHandler: null,
 
     // ── Lifecycle ──
     async init() {
@@ -1764,6 +1767,8 @@ function dashboard() {
       this.fetchStatus();
       this.fetchLogs();
       this.initSSE();
+      this._visibilityHandler = () => this.handleVisibilityChange();
+      document.addEventListener('visibilitychange', this._visibilityHandler);
       // Remove fetchModels and fetchSessions - lazy load on tab switch
 
       this.$watch('activeTab', v => {
@@ -1799,6 +1804,7 @@ function dashboard() {
 
     // ── SSE ──
     initSSE() {
+      if (this._sse || document.hidden) return;
       try {
         const evt = new EventSource('/api/sse');
         evt.onopen = () => {
@@ -1831,15 +1837,34 @@ function dashboard() {
     destroy() {
       if (this._sse)  { this._sse.close(); this._sse = null; }
       if (this._poll) { clearInterval(this._poll); this._poll = null; }
+      if (this._logsController) this._logsController.abort();
+      if (this._visibilityHandler) {
+        document.removeEventListener('visibilitychange', this._visibilityHandler);
+        this._visibilityHandler = null;
+      }
+    },
+
+    handleVisibilityChange() {
+      if (document.hidden) {
+        if (this._sse) { this._sse.close(); this._sse = null; }
+        if (this._poll) { clearInterval(this._poll); this._poll = null; }
+        return;
+      }
+      this.fetchStatus();
+      this.fetchLogs();
+      this.initSSE();
     },
 
     // ── Data ──
     async fetchStatus() {
+      if (this._statusPending) return;
+      this._statusPending = true;
       try {
         const r = await fetch('/api/status');
         if (!r.ok) { if (r.status === 401) window.location = '/login'; return; }
         this.applyStatus(await r.json());
       } catch (e) { console.error('status fetch failed', e); }
+      finally { this._statusPending = false; }
     },
 
     applyStatus(d) {
@@ -1876,6 +1901,9 @@ function dashboard() {
     },
 
     async fetchLogs() {
+      if (this._logsController) this._logsController.abort();
+      const controller = new AbortController();
+      this._logsController = controller;
       this.logs.loading = true;
       try {
         const params = new URLSearchParams({
@@ -1883,13 +1911,20 @@ function dashboard() {
           search: this.logs.search, sort_by: this.logs.sort_by,
           sort_order: String(this.logs.sort_order)
         });
-        const r = await fetch(`/api/logs?${params}`);
+        const r = await fetch(`/api/logs?${params}`, { signal: controller.signal });
         if (!r.ok) return;
         const d = await r.json();
         this.logs.items = d.logs || [];
         this.logs.total = d.total || 0;
         this.logs.total_pages = d.total_pages || 1;
-      } finally { this.logs.loading = false; }
+      } catch (e) {
+        if (e.name !== 'AbortError') console.error('logs fetch failed', e);
+      } finally {
+        if (this._logsController === controller) {
+          this._logsController = null;
+          this.logs.loading = false;
+        }
+      }
     },
 
     prependLog(log) {
@@ -3143,6 +3178,6 @@ function dashboard() {
   };
 }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@18.0.13/lib/marked.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"></script>
 {% endblock %}
