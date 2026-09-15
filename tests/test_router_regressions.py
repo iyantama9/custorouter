@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app import database
@@ -7,6 +8,9 @@ from app import config
 from app.translator import stream_as_anthropic
 from app.routers import proxy
 from app.sse import SSEBroadcaster
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class HttpClientLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -227,6 +231,30 @@ class OpenAIStreamRelayTests(unittest.IsolatedAsyncioTestCase):
         add_log.assert_called_once()
         bill.assert_awaited_once_with(request, 3)
         broadcast.assert_awaited_once()
+
+
+class MobileDashboardPerformanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+        cls.dashboard = (ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
+
+    def test_mobile_disables_canvas_and_backdrop_compositing(self):
+        self.assertIn("(pointer: coarse)", self.base)
+        self.assertIn("#dot-canvas { display: none; }", self.base)
+        self.assertIn("backdrop-filter: none !important", self.base)
+
+    def test_live_updates_are_coalesced(self):
+        self.assertIn("queueStatus(data.payload)", self.dashboard)
+        self.assertIn("queueLiveLog(data.payload)", self.dashboard)
+        self.assertIn("_pendingProviderKeys", self.dashboard)
+
+    def test_log_rows_use_stable_keys(self):
+        self.assertNotIn("log.timestamp + log.key_used + Math.random()", self.dashboard)
+
+    def test_markdown_libraries_are_lazy_loaded(self):
+        self.assertIn("ensureMarkdownLibraries()", self.dashboard)
+        self.assertNotIn('<script defer src="https://cdn.jsdelivr.net/npm/marked', self.dashboard)
 
 
 if __name__ == "__main__":

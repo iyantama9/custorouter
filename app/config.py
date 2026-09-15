@@ -797,6 +797,7 @@ def add_request_log(model, status_code, key_used, rotated, latency_ms, input_tok
     if provider is None:
         provider = provider_from_model(model)
     log_item = {
+        "id": f"live-{time.time_ns()}",
         "timestamp": timestamp,
         "model": model,
         "status_code": status_code,
@@ -1111,7 +1112,7 @@ async def get_paginated_logs(page: int = 1, per_page: int = 20, search: str = ""
     args = search_args + [per_page, offset]
     arg_offset = len(search_args) + 1
     query = f"""
-        SELECT model, status_code, key_prefix, rotated, latency_ms, created_at
+        SELECT id, model, status_code, key_prefix, rotated, latency_ms, created_at
         FROM request_logs
         {search_clause}
         ORDER BY {sort_by} {sort_order}
@@ -1131,6 +1132,7 @@ async def get_paginated_logs(page: int = 1, per_page: int = 20, search: str = ""
         else:
             ts = str(ts)
         logs.append({
+            "id": r["id"],
             "timestamp": ts,
             "model": r["model"],
             "status_code": r["status_code"],

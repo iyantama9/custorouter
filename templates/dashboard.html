@@ -226,7 +226,7 @@
                     </td>
                   </tr>
                 </template>
-                <template x-for="log in logs.items" :key="log.timestamp + log.key_used + Math.random()">
+                <template x-for="log in logs.items" :key="log.id || `${log.timestamp}:${log.model}:${log.key_used}:${log.status_code}`">
                   <tr class="border-b border-border/40 hover:bg-secondary/20 transition-colors"
                       :class="log.rotated ? 'bg-destructive/[0.03]' : ''">
                     <td class="px-4 py-3 font-mono text-[11px] text-muted-foreground tabular-nums" x-text="log.timestamp">--</td>
@@ -1744,14 +1744,20 @@ function dashboard() {
 
     keys: [],
     toasts: [],
-    sparkHistory: [],
     _providersSignature: null,
+    _pendingProviderKeys: [],
+    _providerKeysSignature: '',
+    _pendingStatus: null,
+    _statusTimer: null,
+    _pendingLiveLogs: [],
+    _logTimer: null,
     _routingRefreshTimer: null,
     _sse: null,
     _poll: null,
     _statusPending: false,
     _logsController: null,
     _visibilityHandler: null,
+    _markdownPromise: null,
 
     // ── Lifecycle ──
     async init() {
@@ -1771,7 +1777,7 @@ function dashboard() {
       document.addEventListener('visibilitychange', this._visibilityHandler);
       // Remove fetchModels and fetchSessions - lazy load on tab switch
 
-      this.$watch('activeTab', v => {
+      this.$watch('activeTab', async v => {
         if (v === 'routing') {
           this.fetchRoutingStats();
         }
@@ -1781,14 +1787,18 @@ function dashboard() {
         }
         // Lazy load playground data only when tab is switched
         if (v === 'playground' && !this.pg.loaded) {
+          this.pg.loaded = true;
+          await this.ensureMarkdownLibraries();
           this.fetchPlaygroundModels();
           this.fetchSessions();
           if (!this.providerMgmt.providers.length) this.fetchProviders();
-          this.pg.loaded = true;
         }
         // Lazy load router keys only when tab is switched
         if (v === 'keys' && this.routerKeys.keys.length === 0) {
           this.fetchRouterKeys();
+        }
+        if (v === 'keys') {
+          this.applyProviderKeys();
         }
         if (v === 'keys' && this.providerMgmt.providers.length === 0) {
           this.fetchProviders();
@@ -1799,7 +1809,7 @@ function dashboard() {
         }
       });
 
-      this.$nextTick(() => lucide.createIcons());
+      this.$nextTick(() => window.refreshLucideIcons());
     },
 
     // ── SSE ──
@@ -1820,11 +1830,13 @@ function dashboard() {
         evt.onmessage = (e) => {
           try {
             const data = JSON.parse(e.data);
-            if (data.type === 'status') this.applyStatus(data.payload);
+            if (data.type === 'status') this.queueStatus(data.payload);
             if (data.type === 'log') {
-              this.prependLog(data.payload);
-              this.pulseProvider(data.payload?.provider);
-              if (this.activeTab === 'routing') this.scheduleRoutingRefresh();
+              this.queueLiveLog(data.payload);
+              if (this.activeTab === 'routing') {
+                this.pulseProvider(data.payload?.provider);
+                this.scheduleRoutingRefresh();
+              }
             }
           } catch {}
         };
@@ -1837,6 +1849,8 @@ function dashboard() {
     destroy() {
       if (this._sse)  { this._sse.close(); this._sse = null; }
       if (this._poll) { clearInterval(this._poll); this._poll = null; }
+      if (this._statusTimer) { clearTimeout(this._statusTimer); this._statusTimer = null; }
+      if (this._logTimer) { clearTimeout(this._logTimer); this._logTimer = null; }
       if (this._logsController) this._logsController.abort();
       if (this._visibilityHandler) {
         document.removeEventListener('visibilitychange', this._visibilityHandler);
@@ -1856,6 +1870,17 @@ function dashboard() {
     },
 
     // ── Data ──
+    queueStatus(status) {
+      this._pendingStatus = status;
+      if (this._statusTimer) return;
+      this._statusTimer = setTimeout(() => {
+        this._statusTimer = null;
+        const latest = this._pendingStatus;
+        this._pendingStatus = null;
+        if (latest && !document.hidden) this.applyStatus(latest);
+      }, 250);
+    },
+
     async fetchStatus() {
       if (this._statusPending) return;
       this._statusPending = true;
@@ -1881,23 +1906,34 @@ function dashboard() {
           if (this.activeTab === 'models') this.fetchModels();
         }
       }
-      this.stats = d;
-      let newKeys = d.keys || [];
+      // Keep the large key array outside the always-reactive stats object.
+      // The key table is only hydrated when its tab is visible.
+      const status = { ...d };
+      delete status.keys;
+      this.stats = status;
+      let newKeys = [...(d.keys || [])];
       newKeys.sort((a, b) => {
         if (a.status === 'Active' && b.status !== 'Active') return -1;
         if (a.status !== 'Active' && b.status === 'Active') return 1;
         return 0;
       });
-      this.keys = newKeys;
+      this._pendingProviderKeys = newKeys;
+      if (this.activeTab === 'keys') this.applyProviderKeys();
       this.metrics[0].value = this.formatNumber(d.total_requests);
       this.metrics[1].value = this.formatNumber(d.total_tokens || 0);
       this.metrics[2].value = this.fmtUptime(d.uptime_seconds);
       this.metrics[3].value = d.failover_count;
       this.metrics[4].value = `${d.available_keys ?? 0}/${d.total_keys}`;
 
-      this.sparkHistory.push(d.total_requests);
-      if (this.sparkHistory.length > 20) this.sparkHistory.shift();
-      this.metrics.forEach(m => m.spark = [...this.sparkHistory]);
+    },
+
+    applyProviderKeys() {
+      const signature = this._pendingProviderKeys
+        .map(k => `${k.prefix}:${k.status}:${k.provider || ''}`)
+        .join('|');
+      if (signature === this._providerKeysSignature) return;
+      this._providerKeysSignature = signature;
+      this.keys = this._pendingProviderKeys;
     },
 
     async fetchLogs() {
@@ -1927,10 +1963,25 @@ function dashboard() {
       }
     },
 
-    prependLog(log) {
-      this.logs.items.unshift(log);
-      if (this.logs.items.length > this.logs.per_page) this.logs.items.pop();
-      this.logs.total = (this.logs.total || 0) + 1;
+    queueLiveLog(log) {
+      this._pendingLiveLogs.unshift(log);
+      if (this._pendingLiveLogs.length > this.logs.per_page) this._pendingLiveLogs.pop();
+      if (this._logTimer) return;
+      this._logTimer = setTimeout(() => {
+        this._logTimer = null;
+        const incoming = this._pendingLiveLogs.splice(0);
+        if (!incoming.length) return;
+        const seen = new Set();
+        this.logs.items = [...incoming, ...this.logs.items]
+          .filter(item => {
+            const id = item.id || `${item.timestamp}:${item.model}:${item.key_used}:${item.status_code}`;
+            if (seen.has(id)) return false;
+            seen.add(id);
+            return true;
+          })
+          .slice(0, this.logs.per_page);
+        this.logs.total = (this.logs.total || 0) + incoming.length;
+      }, 250);
     },
 
     // ── Pagination ──
@@ -2131,7 +2182,7 @@ function dashboard() {
 
     openBrainMemory(row) {
       this.brain.selected = row;
-      this.$nextTick(() => lucide.createIcons());
+      this.$nextTick(() => window.refreshLucideIcons());
     },
 
     openSessionDetail(session) {
@@ -2139,7 +2190,7 @@ function dashboard() {
       this.brain.sessionMessages = [];
       this.brain.loadingMessages = true;
       this.fetchSessionMessages(session.id);
-      this.$nextTick(() => lucide.createIcons());
+      this.$nextTick(() => window.refreshLucideIcons());
     },
 
     async fetchSessionMessages(sessionId) {
@@ -2152,7 +2203,7 @@ function dashboard() {
         this.toast('Failed to load messages', 'error');
       } finally {
         this.brain.loadingMessages = false;
-        this.$nextTick(() => lucide.createIcons());
+        this.$nextTick(() => window.refreshLucideIcons());
       }
     },
 
@@ -2194,7 +2245,7 @@ function dashboard() {
           selected: this.brain.selected,
           selectedSession: this.brain.selectedSession
         };
-        this.$nextTick(() => lucide.createIcons());
+        this.$nextTick(() => window.refreshLucideIcons());
       } catch (e) {
         this.toast('Brain monitor failed', 'error');
       } finally {
@@ -2209,7 +2260,7 @@ function dashboard() {
         if (!r.ok) { if (r.status === 401) window.location = '/login'; return; }
         const d = await r.json();
         this.routerKeys.keys = d.keys || [];
-        this.$nextTick(() => lucide.createIcons());
+        this.$nextTick(() => window.refreshLucideIcons());
       } catch (e) {
         this.toast('Failed to load router keys', 'error');
       }
@@ -2296,7 +2347,7 @@ function dashboard() {
         rk.modelAliases = {};
       }
       rk.formOpen = true;
-      this.$nextTick(() => lucide.createIcons());
+      this.$nextTick(() => window.refreshLucideIcons());
     },
 
     parseKeyJson(raw) {
@@ -2312,7 +2363,7 @@ function dashboard() {
       if (!this.models.loaded) await this.fetchModels();
       this.routerKeys.pickerSearch = '';
       this.routerKeys.pickerOpen = true;
-      this.$nextTick(() => lucide.createIcons());
+      this.$nextTick(() => window.refreshLucideIcons());
     },
 
     pickerModels() {
@@ -2403,7 +2454,7 @@ function dashboard() {
         rk.modelPrompts = {};
         rk.modelAliases = {};
         rk.resetUsage = false;
-        this.$nextTick(() => lucide.createIcons());
+        this.$nextTick(() => window.refreshLucideIcons());
       } catch (e) {
         this.toast(`Network error while ${editing ? 'saving' : 'generating'} key`, 'error');
       } finally {
@@ -2475,7 +2526,7 @@ function dashboard() {
         // the catalog changed underneath the selection.
         this.models.selected = [];
         this.models.loaded = true;
-        this.$nextTick(() => lucide.createIcons());
+        this.$nextTick(() => window.refreshLucideIcons());
       } catch (e) {
         this.toast('Failed to load models', 'error');
       } finally {
@@ -2610,6 +2661,27 @@ function dashboard() {
     },
 
     // ── Playground ──
+    ensureMarkdownLibraries() {
+      if (window.marked && window.DOMPurify) return Promise.resolve();
+      if (this._markdownPromise) return this._markdownPromise;
+      const load = (src, ready) => new Promise((resolve, reject) => {
+        if (ready()) { resolve(); return; }
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+      this._markdownPromise = Promise.all([
+        load('https://cdn.jsdelivr.net/npm/marked@18.0.13/lib/marked.umd.js', () => !!window.marked),
+        load('https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js', () => !!window.DOMPurify),
+      ]).catch(() => {
+        this.toast('Markdown renderer failed to load', 'error');
+      });
+      return this._markdownPromise;
+    },
+
     async fetchPlaygroundModels() {
       try {
         const r = await fetch('/api/models');
@@ -2628,7 +2700,11 @@ function dashboard() {
     },
 
     renderMarkdown(txt) {
-      if (!window.marked || !window.DOMPurify) return txt;
+      if (!window.marked || !window.DOMPurify) {
+        const fallback = document.createElement('div');
+        fallback.textContent = txt || '';
+        return fallback.innerHTML.replace(/\n/g, '<br>');
+      }
       const clean = DOMPurify.sanitize(marked.parse(txt || ''));
       // Tag images so they get the download affordance + size clamp. Done on
       // the already-sanitized DOM rather than by splicing the raw string, so
@@ -2995,7 +3071,7 @@ function dashboard() {
           this.toast(streamError ? `Chat failed: ${streamError}` : 'No response received', 'error');
         }
         this.pg.loading = false;
-        this.$nextTick(() => { if (window.lucide) window.lucide.createIcons(); });
+        this.$nextTick(() => window.refreshLucideIcons());
       }
     },
 
@@ -3053,7 +3129,7 @@ function dashboard() {
         this.routing.providers = d.providers || [];
         this.routing.recent = d.recent || [];
         this.routing.loaded = true;
-        this.$nextTick(() => lucide.createIcons());
+        this.$nextTick(() => window.refreshLucideIcons());
       } catch { this.toast('Failed to load routing stats', 'error'); }
       finally { this.routing.loading = false; }
     },
@@ -3178,6 +3254,4 @@ function dashboard() {
   };
 }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/marked@18.0.13/lib/marked.umd.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"></script>
 {% endblock %}

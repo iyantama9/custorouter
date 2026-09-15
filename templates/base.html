@@ -26,10 +26,35 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=optional"
+        onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=optional" rel="stylesheet"></noscript>
 
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.17.3/dist/cdn.min.js"></script>
-  <script src="https://unpkg.com/lucide@1.46.0/dist/umd/lucide.min.js"></script>
+  <script defer src="https://unpkg.com/lucide@1.46.0/dist/umd/lucide.min.js" onload="window.refreshLucideIcons()"></script>
+  <script>
+    // Coalesce icon rendering and keep already-rendered SVGs out of future
+    // document-wide scans. Re-scanning every icon after each reactive update
+    // was particularly expensive on low-power Android devices.
+    (function () {
+      var scheduled = false;
+      window.refreshLucideIcons = function () {
+        if (scheduled) return;
+        scheduled = true;
+        var render = function () {
+          scheduled = false;
+          if (!window.lucide) return;
+          window.lucide.createIcons();
+          document.querySelectorAll('svg[data-lucide]').forEach(function (svg) {
+            svg.setAttribute('data-icon', svg.getAttribute('data-lucide'));
+            svg.removeAttribute('data-lucide');
+          });
+        };
+        if ('requestIdleCallback' in window) requestIdleCallback(render, { timeout: 250 });
+        else setTimeout(render, 0);
+      };
+    })();
+  </script>
 
   <style>
     :root {
@@ -190,6 +215,23 @@
       .pulse-ring::after { animation: none; }
       .connector-live { animation: none; stroke-dasharray: none; }
     }
+
+    /* Mobile GPUs pay heavily for fixed canvases and backdrop filters while
+       scrolling. Keep the static grid, but remove continuous compositing on
+       coarse-pointer devices. */
+    @media (max-width: 767px), (pointer: coarse) {
+      .dot-layer { position: absolute; min-height: 100vh; }
+      #dot-canvas { display: none; }
+      .backdrop-blur, .backdrop-blur-sm, .backdrop-blur-xl {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+      }
+      .connector-live {
+        animation: none;
+        filter: none;
+        stroke-dasharray: none;
+      }
+    }
   </style>
   {% block head %}{% endblock %}
 </head>
@@ -210,6 +252,7 @@
       var canvas = document.getElementById('dot-canvas');
       if (!layer || !canvas || !canvas.getContext) return;
       if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return;
 
       var ctx = canvas.getContext('2d');
       var SPACING = 26;      // must match --dot-size
@@ -298,7 +341,7 @@
       resize();
     })();
   </script>
-  <script>lucide.createIcons();</script>
+  <script>window.refreshLucideIcons();</script>
   {% block scripts %}{% endblock %}
 </body>
 </html>
