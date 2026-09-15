@@ -617,7 +617,7 @@ async def stream_as_anthropic(openai_stream, model, msg_id, input_tokens=0, toke
     async for chunk in get_chunks():
         # Some providers (e.g. Cavoti) send a final usage-only chunk with empty choices list
         if not chunk.get("choices"):
-            usage = chunk.get("usage", {})
+            usage = chunk.get("usage") or {}
             if usage.get("completion_tokens"):
                 output_tokens = usage["completion_tokens"]
             continue
@@ -626,7 +626,7 @@ async def stream_as_anthropic(openai_stream, model, msg_id, input_tokens=0, toke
         fr = choice.get("finish_reason")
         if fr:
             finish_reason = fr
-        usage = chunk.get("usage", {})
+        usage = chunk.get("usage") or {}
         if usage.get("completion_tokens"):
             output_tokens = usage["completion_tokens"]
 

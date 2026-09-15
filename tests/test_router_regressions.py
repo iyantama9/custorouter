@@ -1,7 +1,9 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from app import database
+from app.translator import stream_as_anthropic
 from app.routers import proxy
 from app.sse import SSEBroadcaster
 
@@ -76,6 +78,55 @@ class SSEBackpressureTests(unittest.IsolatedAsyncioTestCase):
         while not queue.empty():
             newest = await queue.get()
         self.assertIn('"value": 149', newest)
+
+
+class AnthropicStreamTranslationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_accepts_openai_chunks_with_null_usage(self):
+        chunks = [
+            {
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": None,
+                }],
+                "usage": None,
+            },
+            {
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "OK"},
+                    "finish_reason": None,
+                }],
+                "usage": None,
+            },
+            {
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": ""},
+                    "finish_reason": "stop",
+                }],
+                "usage": None,
+            },
+            {"choices": [], "usage": {"completion_tokens": 1}},
+        ]
+
+        class FakeResponse:
+            async def aiter_lines(self):
+                for chunk in chunks:
+                    yield f"data: {json.dumps(chunk)}"
+                yield "data: [DONE]"
+
+        events = [
+            event
+            async for event in stream_as_anthropic(
+                FakeResponse(), "qc/glm-5.3", "msg_test"
+            )
+        ]
+
+        output = "".join(events)
+        self.assertIn('"type": "content_block_delta"', output)
+        self.assertIn('"text": "OK"', output)
+        self.assertIn('"type": "message_stop"', output)
 
 
 if __name__ == "__main__":
