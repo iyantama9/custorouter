@@ -111,7 +111,7 @@ async def security_and_observability_headers(request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; "
-        "form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
+        "form-action 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net "
         "https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; "
         "connect-src 'self' https:"
