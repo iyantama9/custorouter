@@ -292,6 +292,18 @@ async def setup_tables():
         CREATE INDEX IF NOT EXISTS idx_brain_conversations_session_created
         ON brain_conversations(session_id, created_at)
     """)
+    # Build online: existing Brain tables can be large and startup must not
+    # block concurrent conversation writes while the retrieval indexes build.
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_conversations_user_recent_embedded
+        ON brain_conversations(api_key_hash, created_at DESC, id DESC)
+        WHERE embedding IS NOT NULL
+    """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_conversations_lexical_embedded
+        ON brain_conversations USING GIN (to_tsvector('simple', content))
+        WHERE embedding IS NOT NULL
+    """)
     await execute("""
         DROP INDEX IF EXISTS idx_brain_conversations_embedding
     """)
@@ -330,6 +342,14 @@ async def setup_tables():
         CREATE INDEX IF NOT EXISTS idx_brain_decisions_created
         ON brain_decisions(created_at DESC)
     """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_decisions_user_recent
+        ON brain_decisions(api_key_hash, created_at DESC, id DESC)
+    """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_decisions_lexical
+        ON brain_decisions USING GIN (to_tsvector('simple', title))
+    """)
 
     await execute("""
         CREATE TABLE IF NOT EXISTS brain_facts (
@@ -350,6 +370,18 @@ async def setup_tables():
     await execute("""
         CREATE INDEX IF NOT EXISTS idx_brain_facts_category
         ON brain_facts(category)
+    """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_facts_user_text
+        ON brain_facts(api_key_hash, md5(lower(fact)))
+    """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_facts_user_recent
+        ON brain_facts(api_key_hash, created_at DESC, id DESC)
+    """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_brain_facts_lexical
+        ON brain_facts USING GIN (to_tsvector('simple', fact))
     """)
 
     await execute("""
@@ -438,12 +470,20 @@ async def setup_tables():
             name VARCHAR(100) NOT NULL,
             base_url TEXT NOT NULL,
             api_format VARCHAR(20) NOT NULL DEFAULT 'openai',
+            auth_header VARCHAR(20) NOT NULL DEFAULT 'bearer',
+            anthropic_version VARCHAR(20) NOT NULL DEFAULT '2023-06-01',
             models TEXT NOT NULL DEFAULT '',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
     await execute("""
         ALTER TABLE custom_providers ADD COLUMN IF NOT EXISTS models TEXT NOT NULL DEFAULT ''
+    """)
+    await execute("""
+        ALTER TABLE custom_providers ADD COLUMN IF NOT EXISTS auth_header VARCHAR(20) NOT NULL DEFAULT 'bearer'
+    """)
+    await execute("""
+        ALTER TABLE custom_providers ADD COLUMN IF NOT EXISTS anthropic_version VARCHAR(20) NOT NULL DEFAULT '2023-06-01'
     """)
 
     # Built-in providers the admin has chosen to remove. Routing checks this
@@ -631,10 +671,11 @@ async def delete_router_api_key(key_id: int):
 async def get_custom_providers():
     return await fetch("SELECT * FROM custom_providers ORDER BY created_at ASC")
 
-async def insert_custom_provider(prefix: str, name: str, base_url: str, api_format: str):
+async def insert_custom_provider(prefix: str, name: str, base_url: str, api_format: str,
+                                 auth_header: str = "bearer", anthropic_version: str = "2023-06-01"):
     return await fetchrow(
-        "INSERT INTO custom_providers (prefix, name, base_url, api_format) VALUES ($1, $2, $3, $4) RETURNING *",
-        prefix, name, base_url, api_format
+        "INSERT INTO custom_providers (prefix, name, base_url, api_format, auth_header, anthropic_version) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+        prefix, name, base_url, api_format, auth_header, anthropic_version
     )
 
 async def update_custom_provider_models(prefix: str, models_csv: str):

@@ -12,17 +12,20 @@ def flatten_content(content):
 def convert_tools(anthropic_tools):
     if not anthropic_tools:
         return []
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("input_schema", {}),
-            },
+    converted = []
+    for tool in anthropic_tools:
+        function = {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": tool.get("input_schema", {}),
         }
-        for t in anthropic_tools
-    ]
+        if "strict" in tool:
+            function["strict"] = tool["strict"]
+        converted.append({
+            "type": "function",
+            "function": function,
+        })
+    return converted
 
 def to_openai_messages(body):
     messages = []
@@ -237,11 +240,13 @@ def build_openai_request(body, provider="kc", session_history=None):
         "stream": body.get("stream", False),
     }
     if "max_tokens" in body:
-        # Cap max_tokens to prevent context window overflow (model limit 196608)
-        req["max_tokens"] = min(int(body["max_tokens"]), 16384)
+        req["max_tokens"] = body["max_tokens"]
     if "temperature" in body:
-        # Limit temperature to max 0.2 for deterministic coding tool executions
-        req["temperature"] = min(float(body["temperature"]), 0.2)
+        req["temperature"] = body["temperature"]
+    if "top_p" in body:
+        req["top_p"] = body["top_p"]
+    if "stop_sequences" in body:
+        req["stop"] = body["stop_sequences"]
 
     tools = convert_tools(body.get("tools"))
     if tools:
@@ -253,6 +258,8 @@ def build_openai_request(body, provider="kc", session_history=None):
             req["tool_choice"] = "auto"
         elif tc.get("type") == "any":
             req["tool_choice"] = "required"
+        elif tc.get("type") == "none":
+            req["tool_choice"] = "none"
         elif tc.get("type") == "tool":
             req["tool_choice"] = {"type": "function", "function": {"name": tc["name"]}}
 
@@ -318,7 +325,7 @@ def to_anthropic_response(openai_resp, model, msg_id):
         if image_url:
             content.append({"type": "image", "source": {"type": "url", "url": image_url}})
 
-    stop_reason = "tool_use" if finish_reason == "tool_calls" else "end_turn"
+    stop_reason = {"tool_calls": "tool_use", "length": "max_tokens"}.get(finish_reason, "end_turn")
     return {
         "id": msg_id,
         "type": "message",
@@ -807,7 +814,7 @@ async def stream_as_anthropic(openai_stream, model, msg_id, input_tokens=0, toke
     if stop_evt:
         yield stop_evt
 
-    stop_reason = "tool_use" if finish_reason == "tool_calls" else "end_turn"
+    stop_reason = {"tool_calls": "tool_use", "length": "max_tokens"}.get(finish_reason, "end_turn")
     yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
 
     yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"

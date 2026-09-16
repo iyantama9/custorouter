@@ -117,23 +117,36 @@ async def _borrow_custom_client():
     yield _get_custom_client()
 
 
-async def _build_status_dict():
-    from app.config import get_masked_keys
+async def _build_status_dict(include_details: bool = True):
     uptime_seconds = int(time.time() - config_module.START_TIME)
-    _all_keys = get_masked_keys()
-    available_keys = sum(1 for k in _all_keys if k['status'] in ('Active', 'Standby'))
-    return {
+    if include_details:
+        from app.config import get_masked_keys
+        all_keys = get_masked_keys()
+        total_keys = len(all_keys)
+        available_keys = sum(k['status'] in ('Active', 'Standby') for k in all_keys)
+    else:
+        key_values = (config_module.BM_API_KEYS + config_module.NR_API_KEYS +
+                      config_module.DAHL_API_KEYS + config_module.QC_API_KEYS +
+                      config_module.MARKETKU_API_KEYS)
+        key_values += [key for keys in config_module.CUSTOM_PROVIDER_KEYS.values() for key in keys]
+        total_keys = len(key_values)
+        available_keys = sum(config_module.key_statuses.get(key, 'Standby') in ('Active', 'Standby') for key in key_values)
+    status = {
         "status": "online",
         "uptime_seconds": uptime_seconds,
         "total_requests": config_module.total_requests,
         "failover_count": config_module.failover_count,
         "total_tokens": config_module.total_tokens,
         "available_keys": available_keys,
-        "total_keys": len(_all_keys),
-        "keys": _all_keys,
-        "recent_requests": recent_requests,
-        "providers_signature": config_module.providers_signature(),
+        "total_keys": total_keys,
     }
+    if include_details:
+        status.update({
+            "keys": all_keys,
+            "recent_requests": recent_requests,
+            "providers_signature": config_module.providers_signature(),
+        })
+    return status
 
 
 async def _check_router_auth(request: Request):
@@ -367,6 +380,7 @@ async def _broadcast_request_log():
     routing graph's connector animation)."""
     try:
         await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
+        await sse_broadcaster.broadcast("status", await _build_status_dict(include_details=False))
     except Exception:
         pass
 
@@ -413,7 +427,7 @@ def _final_stream_tokens(tracker: dict) -> tuple[int, int]:
 # Connect fails fast (a live host completes TCP+TLS in well under this);
 # read stays generous since legitimate generation can genuinely take a
 # while.
-async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, display_model: str = None):
+async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, display_model: str = None, anthropic_headers=None):
     """
     Send an Anthropic-shaped request to an admin-added custom provider and
     return an Anthropic-shaped result, regardless of whether that provider
@@ -448,7 +462,7 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
 
     for attempt in range(len(keys)):
         key = config_module.get_current_custom_key(prefix)
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        headers = config_module.custom_provider_headers(info, key, anthropic_headers)
 
         try:
             if api_format == "anthropic":
@@ -559,12 +573,63 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
         except Exception as e:
             last_status, last_body = 502, {"error": {"message": f"{type(e).__name__}: {e}"}}
 
-        if attempt < len(keys) - 1:
+        if last_status in _RETRYABLE_UPSTREAM_STATUSES and attempt < len(keys) - 1:
             config_module.rotate_custom_key(prefix)
         else:
             break
 
     return "json", last_status, last_body
+
+
+async def _dispatch_custom_openai(prefix: str, payload: dict, stream: bool):
+    """Forward an OpenAI request to an OpenAI provider without translating it."""
+    info = config_module.CUSTOM_PROVIDERS[prefix]
+    keys = config_module.CUSTOM_PROVIDER_KEYS.get(prefix) or []
+    if not keys:
+        return "json", 500, {"error": {"message": f"No API keys configured for provider '{prefix}'"}}, None
+
+    url = f"{info['base_url']}/chat/completions"
+    last_status = 502
+    last_body = {"error": {"message": "All configured keys for this provider failed."}}
+    for attempt in range(len(keys)):
+        key = config_module.get_current_custom_key(prefix)
+        headers = config_module.custom_provider_headers(info, key)
+        try:
+            if stream:
+                client = _get_custom_client()
+                upstream_request = client.build_request("POST", url, headers=headers, json=payload)
+                response = await client.send(upstream_request, stream=True)
+                if response.status_code == 200:
+                    return "stream", 200, response, key
+                raw_body = await response.aread()
+                await response.aclose()
+                try:
+                    last_body = json.loads(raw_body)
+                except Exception:
+                    last_body = {"error": {"message": raw_body.decode(errors="replace")}}
+                last_status = response.status_code
+            else:
+                async with _borrow_custom_client() as client:
+                    response = await client.post(url, headers=headers, json=payload)
+                last_status = response.status_code
+                try:
+                    last_body = response.json()
+                except Exception:
+                    last_body = {"error": {"message": response.text}}
+                    if last_status == 200:
+                        last_status = 502
+                if last_status == 200:
+                    return "json", 200, last_body, key
+        except httpx.HTTPError as exc:
+            last_status = 502
+            last_body = {"error": {"message": f"Upstream connection failed: {type(exc).__name__}"}}
+
+        if last_status in _RETRYABLE_UPSTREAM_STATUSES and attempt < len(keys) - 1:
+            config_module.rotate_custom_key(prefix)
+        else:
+            break
+
+    return "json", last_status, last_body, None
 
 
 def _qwen_image_request(payload: dict) -> dict:
@@ -745,7 +810,9 @@ async def messages(request: Request):
             payload["model"] = requested_model_raw[len(cprefix) + 1:]
             want_stream = bool(payload.get("stream"))
             start_req_time = time.time()
-            kind, status, body = await _dispatch_custom_provider(cprefix, payload, want_stream, display_model)
+            kind, status, body = await _dispatch_custom_provider(
+                cprefix, payload, want_stream, display_model, request.headers
+            )
             log_model = f"{cprefix}/{payload['model']}"
             # Echo the alias back rather than the real model id.
             if kind == "json" and isinstance(body, dict) and body.get("model"):
@@ -795,8 +862,9 @@ async def messages(request: Request):
             await _broadcast_request_log()
             return JSONResponse(status_code=status, content=body)
 
-    # Brain: Always enabled for all users
-    enable_brain = True
+    # Memory-based prompt augmentation is opt-in; ordinary proxy requests
+    # must not silently change the model's instructions or add DB latency.
+    enable_brain = request.headers.get("X-Enable-Brain", "false").lower() == "true"
 
     # Conversation Memory: Extract session headers
     enable_memory = request.headers.get("X-Enable-Memory", "false").lower() == "true"
@@ -879,15 +947,18 @@ async def messages(request: Request):
             f"{api_key_hash_for_brain}:{normalized_first_text}"
         )[:16]
 
-    from app.database import get_or_create_session, load_session_history
-    session_id = await get_or_create_session(
-        identifier=session_id_header,
-        api_key_hash=api_key_hash_for_brain,
-        model=payload.get("model")
-    )
+    session_id = None
+    if enable_brain or enable_memory:
+        from app.database import get_or_create_session
+        session_id = await get_or_create_session(
+            identifier=session_id_header,
+            api_key_hash=api_key_hash_for_brain,
+            model=payload.get("model")
+        )
 
     session_history = None
     if enable_memory:
+        from app.database import load_session_history
         history_rows = await load_session_history(session_id, limit=config_module.MAX_HISTORY_MESSAGES)
         if history_rows:
             session_history = []
@@ -1013,7 +1084,7 @@ async def messages(request: Request):
                 add_request_log(log_model, 200, current_key, False, total_ms, input_tokens, 0)
                 await _bill_router_key(request, input_tokens)
                 await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
-                await sse_broadcaster.broadcast("status", await _build_status_dict())
+                await sse_broadcaster.broadcast("status", await _build_status_dict(include_details=False))
                 return JSONResponse(result)
 
             last_status = resp.status_code
@@ -1151,7 +1222,7 @@ async def messages(request: Request):
                                         first_token_time = time.time()
 
                                     # Accumulate response content for brain persistence
-                                    if enable_brain and session_id:
+                                    if (enable_brain or enable_memory) and session_id:
                                         try:
                                             # Parse SSE chunk to extract content
                                             if chunk.startswith("event: content_block_start\ndata: "):
@@ -1201,7 +1272,7 @@ async def messages(request: Request):
                                 final_response = [
                                     block for block in accumulated_response if block is not None
                                 ]
-                                if enable_brain and user_message_text:
+                                if (enable_brain or enable_memory) and user_message_text:
                                     await _save_brain_exchange(
                                         session_id=session_id,
                                         api_key_hash=api_key_hash_for_brain,
@@ -1220,7 +1291,7 @@ async def messages(request: Request):
                                     elif provider == "marketku":
                                         rotate_marketku_key()
                                 await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
-                                await sse_broadcaster.broadcast("status", await _build_status_dict())
+                                await sse_broadcaster.broadcast("status", await _build_status_dict(include_details=rotated_occurred))
                                 return
                         except Exception as e:
                             print(f"[STREAM ERROR] Exception during attempt {attempt} (key: {current_key[:10]}...): {type(e).__name__}: {str(e)}")
@@ -1374,7 +1445,7 @@ async def messages(request: Request):
                 add_request_log(log_model, 200, current_key, rotated_occurred, total_ms, input_tokens, output_tokens, cached_tokens)
                 await _bill_router_key(request, input_tokens + output_tokens)
 
-                if enable_brain and user_message_text:
+                if (enable_brain or enable_memory) and user_message_text:
                     await _save_brain_exchange(
                         session_id=session_id,
                         api_key_hash=api_key_hash_for_brain,
@@ -1394,7 +1465,7 @@ async def messages(request: Request):
                         rotate_marketku_key()
                     # Dahl upstream is inherently slow; don't rotate on slow total time
                 await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
-                await sse_broadcaster.broadcast("status", await _build_status_dict())
+                await sse_broadcaster.broadcast("status", await _build_status_dict(include_details=rotated_occurred))
                 return JSONResponse(anthropic_resp)
             except Exception as e:
                 print(f"[LOG] Request attempt {attempt} with key {current_key[:10]}... failed: {type(e).__name__}: {str(e)}")
@@ -1524,14 +1595,17 @@ async def _relay_openai_upstream_stream(
     provider: str,
     started_at: float,
     request: Request,
+    strip_thinking: bool = True,
+    input_tokens_estimate: int = 0,
 ):
     """Relay an already-open upstream SSE response and account for usage."""
     import re
 
-    should_strip = requested_model.endswith(("-thinking", "-agentic", "-thinking-agentic"))
+    should_strip = strip_thinking and requested_model.endswith(("-thinking", "-agentic", "-thinking-agentic"))
     buffer = ""
     inside_thinking = False
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    output_chars = 0
 
     try:
         async for chunk in resp.aiter_bytes():
@@ -1555,6 +1629,13 @@ async def _relay_openai_upstream_stream(
                     token_usage["prompt_tokens"] = usage["prompt_tokens"]
                 if usage.get("completion_tokens"):
                     token_usage["completion_tokens"] = usage["completion_tokens"]
+
+                for choice in data.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    output_chars += len(delta.get("content") or "")
+                    for tool_call in delta.get("tool_calls") or []:
+                        function = tool_call.get("function") or {}
+                        output_chars += len(function.get("name") or "") + len(function.get("arguments") or "")
 
                 if should_strip and (data.get("choices") or []):
                     delta = data["choices"][0].get("delta", {})
@@ -1582,6 +1663,10 @@ async def _relay_openai_upstream_stream(
             yield buffer.encode("utf-8")
     finally:
         await resp.aclose()
+        if input_tokens_estimate and not token_usage["prompt_tokens"]:
+            token_usage["prompt_tokens"] = input_tokens_estimate
+        if output_chars and not token_usage["completion_tokens"]:
+            token_usage["completion_tokens"] = max(1, int(output_chars / 3.5))
         total_ms = int((time.time() - started_at) * 1000)
         add_request_log(
             requested_model,
@@ -1639,12 +1724,57 @@ async def chat_completions(request: Request):
     for cprefix in config_module.CUSTOM_PROVIDERS:
         if requested_model.startswith(f"{cprefix}/"):
             model_name = requested_model[len(cprefix) + 1:]
+            if config_module.CUSTOM_PROVIDERS[cprefix]["api_format"] == "openai":
+                upstream_payload = {**payload, "model": model_name}
+                start_req_time = time.time()
+                kind, status, body, current_key = await _dispatch_custom_openai(
+                    cprefix, upstream_payload, bool(payload.get("stream"))
+                )
+                log_model = f"{cprefix}/{model_name}"
+                if kind == "stream":
+                    return StreamingResponse(
+                        _relay_openai_upstream_stream(
+                            body,
+                            requested_model=log_model,
+                            display_model=display_model,
+                            current_key=current_key,
+                            provider=cprefix,
+                            started_at=start_req_time,
+                            request=request,
+                            strip_thinking=False,
+                            input_tokens_estimate=estimate_tokens(upstream_payload),
+                        ),
+                        media_type="text/event-stream",
+                    )
+                usage = body.get("usage") or {} if isinstance(body, dict) else {}
+                input_tokens = usage.get("prompt_tokens", 0) or 0
+                output_tokens = usage.get("completion_tokens", 0) or 0
+                add_request_log(
+                    log_model, status, "custom", False,
+                    int((time.time() - start_req_time) * 1000),
+                    input_tokens, output_tokens, provider=cprefix,
+                )
+                if status == 200:
+                    await _bill_router_key(request, input_tokens + output_tokens)
+                    if isinstance(body, dict) and body.get("model"):
+                        body["model"] = display_model
+                await _broadcast_request_log()
+                return JSONResponse(status_code=status, content=body)
+
             system_prompt, anthropic_messages = openai_to_anthropic_messages(payload.get("messages") or [])
+            if "max_tokens" not in payload:
+                return JSONResponse(status_code=400, content={"error": {"message": "max_tokens is required for Anthropic-format providers."}})
             anthropic_payload = {
                 "model": model_name,
                 "messages": anthropic_messages,
-                "max_tokens": payload.get("max_tokens", 4096),
+                "max_tokens": payload["max_tokens"],
             }
+            if "temperature" in payload:
+                anthropic_payload["temperature"] = payload["temperature"]
+            if "top_p" in payload:
+                anthropic_payload["top_p"] = payload["top_p"]
+            if "stop" in payload:
+                anthropic_payload["stop_sequences"] = payload["stop"]
             if system_prompt:
                 anthropic_payload["system"] = system_prompt
             # Without these, an agentic client calling through the OpenAI-
@@ -1658,9 +1788,13 @@ async def chat_completions(request: Request):
             tool_choice = openai_tool_choice_to_anthropic(payload.get("tool_choice"))
             if tool_choice:
                 anthropic_payload["tool_choice"] = tool_choice
+            if payload.get("parallel_tool_calls") is False and anthropic_payload.get("tool_choice", {}).get("type") != "none":
+                anthropic_payload.setdefault("tool_choice", {"type": "auto"})["disable_parallel_tool_use"] = True
             want_stream = bool(payload.get("stream"))
             start_req_time = time.time()
-            kind, status, body = await _dispatch_custom_provider(cprefix, anthropic_payload, want_stream, display_model)
+            kind, status, body = await _dispatch_custom_provider(
+                cprefix, anthropic_payload, want_stream, display_model, request.headers
+            )
             log_model = f"{cprefix}/{model_name}"
             usage = (body or {}).get("usage") or {} if kind == "json" else {}
             if kind == "json":
@@ -1817,19 +1951,22 @@ async def chat_completions(request: Request):
             f"{api_key_hash_for_brain}:{user_message_text[:200]}"
         )[:16]
 
-    from app.database import get_or_create_session
-    session_id = await get_or_create_session(
-        identifier=session_id_header,
-        api_key_hash=api_key_hash_for_brain,
-        model=requested_model,
-    )
+    enable_brain = request.headers.get("X-Enable-Brain", "false").lower() == "true"
+    session_id = None
+    if enable_brain:
+        from app.database import get_or_create_session
+        session_id = await get_or_create_session(
+            identifier=session_id_header,
+            api_key_hash=api_key_hash_for_brain,
+            model=requested_model,
+        )
 
-    if user_message_text:
+    if enable_brain and user_message_text:
         brain_context = await BrainMiddleware.build_brain_context(
             api_key_hash=api_key_hash_for_brain,
             user_message=user_message_text,
             session_id=session_id,
-            enable_brain=True,
+            enable_brain=enable_brain,
         )
         if brain_context:
             payload_messages = list(messages)
@@ -1954,7 +2091,7 @@ async def chat_completions(request: Request):
                 if not assistant_content and message.get("tool_calls"):
                     assistant_content = json.dumps(message.get("tool_calls"))
 
-                if user_message_text:
+                if enable_brain and user_message_text:
                     await _save_brain_exchange(
                         session_id=session_id,
                         api_key_hash=api_key_hash_for_brain,
@@ -1968,7 +2105,7 @@ async def chat_completions(request: Request):
                 add_request_log(requested_model, 200, current_key, False, int((time.time() - start_req_time) * 1000), input_tokens, output_tokens)
                 await _bill_router_key(request, input_tokens + output_tokens)
                 await sse_broadcaster.broadcast("log", recent_requests[0] if recent_requests else {})
-                await sse_broadcaster.broadcast("status", await _build_status_dict())
+                await sse_broadcaster.broadcast("status", await _build_status_dict(include_details=False))
                 # Upstream reports its own model name; swap in the alias so the
                 # rename is consistent with what /v1/models advertised.
                 if isinstance(content, dict) and content.get("model"):

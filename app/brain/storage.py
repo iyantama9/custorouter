@@ -10,6 +10,7 @@ Handles:
 
 import json
 import asyncio
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from app.database import execute, fetch, fetchrow, setup_tables
@@ -22,6 +23,18 @@ def _serialize_row(row) -> Dict[str, Any]:
         if isinstance(value, datetime):
             data[key] = value.isoformat()
     return data
+
+
+def _lexical_query(text: str) -> str:
+    """Build a safe, small OR query so long questions can match older notes."""
+    stopwords = {"the", "and", "for", "this", "that", "with", "apa", "yang", "dan", "ini", "itu", "untuk", "saya", "aku", "bisa", "dari"}
+    words = []
+    for word in re.findall(r"[^\W_]{3,}", text.lower()[:500]):
+        if word not in stopwords and word not in words:
+            words.append(word)
+        if len(words) == 12:
+            break
+    return " | ".join(words)
 
 
 class BrainStorage:
@@ -81,28 +94,37 @@ class BrainStorage:
         api_key_hash: str,
         query_embedding: List[float],
         limit: int = 10,
-        session_id: Optional[int] = None
+        session_id: Optional[int] = None,
+        query_text: str = "",
+        exclude_session_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        """Rerank a bounded mix of recent and indexed lexical candidates.
+
+        This preserves older, topically matching messages without scanning all
+        stored JSON embeddings or requiring pgvector on third-party installs.
         """
-        Search conversations by embedding similarity.
-        Note: This is a simple implementation. For production, use pgvector extension.
-        """
-        if session_id:
-            rows = await fetch("""
-                SELECT id, session_id, role, content, embedding, model, created_at
-                FROM brain_conversations
-                WHERE api_key_hash = $1 AND session_id = $2 AND embedding IS NOT NULL
-                ORDER BY created_at DESC
-                LIMIT 100
-            """, api_key_hash, session_id)
-        else:
-            rows = await fetch("""
-                SELECT id, session_id, role, content, embedding, model, created_at
-                FROM brain_conversations
+        rows = await fetch("""
+            WITH recent_candidates AS (
+                SELECT id FROM brain_conversations
                 WHERE api_key_hash = $1 AND embedding IS NOT NULL
-                ORDER BY created_at DESC
-                LIMIT 100
-            """, api_key_hash)
+                  AND ($2::integer IS NULL OR session_id = $2)
+                  AND ($3::integer IS NULL OR session_id <> $3)
+                ORDER BY created_at DESC, id DESC LIMIT 120
+            ), lexical_candidates AS (
+                SELECT id FROM brain_conversations
+                WHERE api_key_hash = $1 AND embedding IS NOT NULL
+                  AND ($2::integer IS NULL OR session_id = $2)
+                  AND ($3::integer IS NULL OR session_id <> $3)
+                  AND to_tsvector('simple', content) @@ to_tsquery('simple', $4)
+                ORDER BY ts_rank(to_tsvector('simple', content), to_tsquery('simple', $4)) DESC
+                LIMIT 120
+            ), candidate_ids AS (
+                SELECT id FROM recent_candidates UNION SELECT id FROM lexical_candidates
+            )
+            SELECT bc.id, bc.session_id, bc.role, bc.content, bc.embedding,
+                   bc.model, bc.created_at
+            FROM brain_conversations bc JOIN candidate_ids c ON c.id = bc.id
+        """, api_key_hash, session_id, exclude_session_id, _lexical_query(query_text))
 
         # Calculate similarity in Python (fallback)
         from app.brain.embeddings import cosine_similarity
@@ -112,6 +134,8 @@ class BrainStorage:
                 embedding = row["embedding"]
                 if isinstance(embedding, str):
                     embedding = json.loads(embedding)
+                if not isinstance(embedding, list) or len(embedding) != len(query_embedding):
+                    continue
                 similarity = cosine_similarity(query_embedding, embedding)
                 results.append({
                     **_serialize_row(row),
@@ -208,10 +232,37 @@ class BrainStorage:
         api_key_hash: str,
         session_id: Optional[int] = None,
         decision_type: Optional[str] = None,
-        limit: int = 50
+        limit: int = 50,
+        query_text: Optional[str] = None,
+        exclude_model_feedback: bool = False,
     ) -> List[Dict[str, Any]]:
         """Get decisions"""
-        if session_id and decision_type:
+        if query_text is not None:
+            rows = await fetch("""
+                WITH recent_candidates AS (
+                    SELECT id FROM brain_decisions
+                    WHERE api_key_hash = $1
+                      AND ($2::integer IS NULL OR session_id = $2)
+                      AND ($3::text IS NULL OR decision_type = $3)
+                      AND (NOT $4::boolean OR decision_type IS DISTINCT FROM 'model_feedback')
+                    ORDER BY created_at DESC, id DESC LIMIT 60
+                ), lexical_candidates AS (
+                    SELECT id FROM brain_decisions
+                    WHERE api_key_hash = $1
+                      AND ($2::integer IS NULL OR session_id = $2)
+                      AND ($3::text IS NULL OR decision_type = $3)
+                      AND (NOT $4::boolean OR decision_type IS DISTINCT FROM 'model_feedback')
+                      AND to_tsvector('simple', title) @@ to_tsquery('simple', $5)
+                    ORDER BY ts_rank(to_tsvector('simple', title), to_tsquery('simple', $5)) DESC
+                    LIMIT 60
+                ), candidate_ids AS (
+                    SELECT id FROM recent_candidates UNION SELECT id FROM lexical_candidates
+                )
+                SELECT d.* FROM brain_decisions d JOIN candidate_ids c ON c.id = d.id
+                LIMIT $6
+            """, api_key_hash, session_id, decision_type, exclude_model_feedback,
+                _lexical_query(query_text), limit)
+        elif session_id and decision_type:
             rows = await fetch("""
                 SELECT * FROM brain_decisions
                 WHERE api_key_hash = $1 AND session_id = $2 AND decision_type = $3
@@ -276,22 +327,52 @@ class BrainStorage:
         confidence: float = 1.0,
         session_id: int = None
     ):
-        """Save a fact"""
-        await execute("""
+        """Save a new fact once per user, avoiding profile bloat on repeats."""
+        row = await fetchrow("""
             INSERT INTO brain_facts
-            (api_key_hash, session_id, category, fact, source, confidence)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (api_key_hash, session_id, category, fact, source, confidence)
+            SELECT $1, $2, $3, $4, $5, $6
+            WHERE NOT EXISTS (
+                SELECT 1 FROM brain_facts
+                WHERE api_key_hash = $1 AND md5(lower(fact)) = md5(lower($4))
+                  AND lower(fact) = lower($4)
+            )
+            RETURNING id
         """, api_key_hash, session_id, category, fact, source, confidence)
+        return row is not None
 
     @staticmethod
     async def get_facts(
         api_key_hash: str,
         session_id: Optional[int] = None,
         category: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        query_text: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Get facts"""
-        if session_id and category:
+        if query_text is not None:
+            rows = await fetch("""
+                WITH recent_candidates AS (
+                    SELECT id FROM brain_facts
+                    WHERE api_key_hash = $1
+                      AND ($2::integer IS NULL OR session_id = $2)
+                      AND ($3::text IS NULL OR category = $3)
+                    ORDER BY created_at DESC, id DESC LIMIT 80
+                ), lexical_candidates AS (
+                    SELECT id FROM brain_facts
+                    WHERE api_key_hash = $1
+                      AND ($2::integer IS NULL OR session_id = $2)
+                      AND ($3::text IS NULL OR category = $3)
+                      AND to_tsvector('simple', fact) @@ to_tsquery('simple', $4)
+                    ORDER BY ts_rank(to_tsvector('simple', fact), to_tsquery('simple', $4)) DESC
+                    LIMIT 80
+                ), candidate_ids AS (
+                    SELECT id FROM recent_candidates UNION SELECT id FROM lexical_candidates
+                )
+                SELECT f.* FROM brain_facts f JOIN candidate_ids c ON c.id = f.id
+                LIMIT $5
+            """, api_key_hash, session_id, category, _lexical_query(query_text), limit)
+        elif session_id and category:
             rows = await fetch("""
                 SELECT * FROM brain_facts
                 WHERE api_key_hash = $1 AND session_id = $2 AND category = $3

@@ -251,6 +251,12 @@
       var layer = document.getElementById('dot-layer');
       var canvas = document.getElementById('dot-canvas');
       if (!layer || !canvas || !canvas.getContext) return;
+      // The dashboard prioritizes interaction and live data over this
+      // decorative pointer animation, including on desktop GPUs.
+      if (document.querySelector('[x-data="dashboard()"]')) {
+        canvas.remove();
+        return;
+      }
       if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
       if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return;
 

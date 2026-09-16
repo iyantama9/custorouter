@@ -128,11 +128,14 @@ def openai_tools_to_anthropic(openai_tools):
         name = fn.get("name")
         if not name:
             continue
-        result.append({
+        converted = {
             "name": name,
             "description": fn.get("description", ""),
             "input_schema": fn.get("parameters", {}),
-        })
+        }
+        if "strict" in fn:
+            converted["strict"] = fn["strict"]
+        result.append(converted)
     return result
 
 
@@ -145,10 +148,7 @@ def openai_tool_choice_to_anthropic(tool_choice):
     if tool_choice == "required":
         return {"type": "any"}
     if tool_choice == "none":
-        # Anthropic has no direct "tools exist but don't use them" mode;
-        # omitting tool_choice (defaults to auto) is the closest available
-        # behavior rather than pretending an exact equivalent exists.
-        return None
+        return {"type": "none"}
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
         name = tool_choice.get("function", {}).get("name")
         if name:

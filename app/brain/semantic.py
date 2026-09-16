@@ -22,6 +22,7 @@ class SemanticSearch:
         limit: int = 10,
         min_similarity: float = 0.3,
         query_embedding: Optional[List[float]] = None,
+        exclude_session_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search conversations by semantic similarity.
@@ -45,7 +46,9 @@ class SemanticSearch:
             api_key_hash=api_key_hash,
             query_embedding=query_embedding,
             limit=limit * 2,  # Get more results for filtering
-            session_id=session_id
+            session_id=session_id,
+            query_text=query,
+            exclude_session_id=exclude_session_id,
         )
 
         # Filter by minimum similarity
@@ -60,6 +63,7 @@ class SemanticSearch:
         session_id: Optional[int] = None,
         limit: int = 5,
         query_embedding: Optional[List[float]] = None,
+        exclude_session_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Find related past conversations for a given message.
@@ -81,6 +85,7 @@ class SemanticSearch:
             limit=limit,
             min_similarity=0.4,  # Higher threshold for context injection
             query_embedding=query_embedding,
+            exclude_session_id=exclude_session_id,
         )
 
     @staticmethod
@@ -104,7 +109,9 @@ class SemanticSearch:
         # Get all decisions
         decisions = await BrainStorage.get_decisions(
             api_key_hash=api_key_hash,
-            limit=100
+            limit=120,
+            query_text=query,
+            exclude_model_feedback=True,
         )
 
         if not decisions:
@@ -156,7 +163,8 @@ class SemanticSearch:
         facts = await BrainStorage.get_facts(
             api_key_hash=api_key_hash,
             category=category,
-            limit=200
+            limit=160,
+            query_text=query,
         )
 
         if not facts:

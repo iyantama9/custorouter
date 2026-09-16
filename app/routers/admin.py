@@ -165,10 +165,13 @@ async def api_logs(
     return await get_paginated_logs(page, per_page, search, sort_by, sort_order)
 
 
-async def _probe_provider(client: httpx.AsyncClient, prefix: str, base_url: str, key: str) -> str | None:
-    """GET {base_url}/models with this key. Returns prefix on a 200, else None."""
+async def _probe_provider(client: httpx.AsyncClient, prefix: str, info: dict, key: str) -> str | None:
+    """Probe a provider's model endpoint with its configured auth headers."""
     try:
-        r = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {key}"}, timeout=6.0)
+        r = await client.get(
+            f"{info['base_url']}/models",
+            headers=config_module.custom_provider_headers(info, key), timeout=6.0,
+        )
         return prefix if r.status_code == 200 else None
     except Exception:
         return None
@@ -181,11 +184,12 @@ async def detect_provider_for_key(key: str) -> list[str]:
     guess from the key's shape -- provider key formats overlap too much
     (most are just "sk-...") for pattern matching to be reliable.
     """
-    candidates = dict(config_module.BUILTIN_PROVIDER_BASE_URLS)
-    candidates.update({p: info["base_url"] for p, info in config_module.CUSTOM_PROVIDERS.items()})
+    candidates = {prefix: {"base_url": url, "api_format": "openai"}
+                  for prefix, url in config_module.BUILTIN_PROVIDER_BASE_URLS.items()}
+    candidates.update(config_module.CUSTOM_PROVIDERS)
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[
-            _probe_provider(client, prefix, base_url, key) for prefix, base_url in candidates.items()
+            _probe_provider(client, prefix, info, key) for prefix, info in candidates.items()
         ])
     return [r for r in results if r]
 
@@ -271,6 +275,8 @@ async def list_providers_endpoint(user: None = Depends(require_auth)):
             "name": info["name"],
             "base_url": info["base_url"],
             "api_format": info["api_format"],
+            "auth_header": info.get("auth_header", "bearer"),
+            "anthropic_version": info.get("anthropic_version", "2023-06-01"),
             "builtin": False,
             "disabled": False,
             "key_count": key_counts.get(prefix, 0),
@@ -287,9 +293,11 @@ async def add_provider_endpoint(payload: dict = Body(...), user: None = Depends(
     name = payload.get("name", "")
     base_url = payload.get("base_url", "")
     api_format = payload.get("api_format", "openai")
+    auth_header = payload.get("auth_header", "bearer")
+    anthropic_version = payload.get("anthropic_version", "2023-06-01")
     api_key = (payload.get("api_key") or "").strip()
 
-    success, msg = await add_custom_provider(prefix, name, base_url, api_format)
+    success, msg = await add_custom_provider(prefix, name, base_url, api_format, auth_header, anthropic_version)
     if not success:
         return {"success": False, "message": msg}
 

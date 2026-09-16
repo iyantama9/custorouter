@@ -109,7 +109,7 @@ NARA_BASE_URL = os.getenv("NARA_BASE_URL", "https://router.bynara.id/v1").rstrip
 DAHL_BASE_URL = os.getenv("DAHL_BASE_URL", "https://inference.dahl.global/v1").rstrip("/")
 QWEN_CLOUD_BASE_URL = os.getenv("QWEN_CLOUD_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1").rstrip("/")
 SHOW_REASONING = os.getenv("SHOW_REASONING", "true").lower() == "true"
-AUGMENT_SYSTEM_PROMPT = os.getenv("AUGMENT_SYSTEM_PROMPT", "true").lower() == "true"
+AUGMENT_SYSTEM_PROMPT = os.getenv("AUGMENT_SYSTEM_PROMPT", "false").lower() == "true"
 # Rotate key proactively if time-to-first-token exceeds this (ms). 0 = disabled.
 SLOW_RESPONSE_THRESHOLD_MS = int(os.getenv("SLOW_RESPONSE_THRESHOLD_MS", "10000"))
 # Minutes before a "Limited" key is automatically reset to "Standby". 0 = disabled.
@@ -178,7 +178,7 @@ BUILTIN_PROVIDER_BASE_URLS = {
     "marketku": MARKETKU_BASE_URL,
 }
 
-# prefix -> {"name": str, "base_url": str, "api_format": "openai"|"anthropic"}
+# prefix -> provider URL, protocol, authentication header, version, and models
 CUSTOM_PROVIDERS: dict[str, dict] = {}
 # prefix -> [key_value, ...]
 CUSTOM_PROVIDER_KEYS: dict[str, list] = {}
@@ -221,6 +221,8 @@ async def init_state_from_db():
     for row in await get_custom_providers():
         CUSTOM_PROVIDERS[row["prefix"]] = {
             "name": row["name"], "base_url": row["base_url"].rstrip("/"), "api_format": row["api_format"],
+            "auth_header": row["auth_header"],
+            "anthropic_version": row["anthropic_version"],
             "models": [m.strip() for m in (row["models"] or "").split(",") if m.strip()],
         }
         CUSTOM_PROVIDER_KEYS[row["prefix"]] = []
@@ -635,6 +637,25 @@ async def set_custom_provider_models(prefix: str, models: list):
     return True, f"Set {len(cleaned)} models"
 
 
+def custom_provider_headers(info: dict, key: str, request_headers=None) -> dict:
+    """Build only approved upstream headers; never forward router credentials."""
+    headers = {"Content-Type": "application/json"}
+    if info.get("auth_header") == "x-api-key":
+        headers["x-api-key"] = key
+    else:
+        headers["Authorization"] = f"Bearer {key}"
+    if info.get("api_format") == "anthropic":
+        version = info.get("anthropic_version", "2023-06-01")
+        if version:
+            headers["anthropic-version"] = version
+        if request_headers:
+            for name in ("anthropic-version", "anthropic-beta", "anthropic-workspace-id"):
+                value = request_headers.get(name)
+                if value:
+                    headers[name] = value
+    return headers
+
+
 async def refresh_custom_provider_models(prefix: str):
     """Fetch {base_url}/models with whatever key is currently active for this
     provider and cache the id list. Called right after a provider (with a
@@ -651,7 +672,7 @@ async def refresh_custom_provider_models(prefix: str):
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{info['base_url']}/models", headers={"Authorization": f"Bearer {key}"})
+            r = await client.get(f"{info['base_url']}/models", headers=custom_provider_headers(info, key))
         if r.status_code != 200:
             return False, f"HTTP {r.status_code} fetching model list"
         data = r.json()
@@ -672,7 +693,8 @@ async def refresh_custom_provider_models(prefix: str):
     return True, f"Fetched {len(models)} models"
 
 
-async def add_custom_provider(prefix: str, name: str, base_url: str, api_format: str):
+async def add_custom_provider(prefix: str, name: str, base_url: str, api_format: str,
+                              auth_header: str = "bearer", anthropic_version: str = "2023-06-01"):
     from app.database import insert_custom_provider, enable_provider as db_enable_provider
     prefix = prefix.strip().lower()
     name = name.strip()
@@ -685,9 +707,13 @@ async def add_custom_provider(prefix: str, name: str, base_url: str, api_format:
         return False, f"Prefix '{prefix}' is already in use"
     if api_format not in ("openai", "anthropic"):
         return False, "api_format must be 'openai' or 'anthropic'"
+    if auth_header not in ("bearer", "x-api-key"):
+        return False, "auth_header must be 'bearer' or 'x-api-key'"
+    if not isinstance(anthropic_version, str) or (anthropic_version and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", anthropic_version)):
+        return False, "anthropic_version must be YYYY-MM-DD or empty"
 
-    await insert_custom_provider(prefix, name, base_url, api_format)
-    CUSTOM_PROVIDERS[prefix] = {"name": name, "base_url": base_url, "api_format": api_format, "models": []}
+    await insert_custom_provider(prefix, name, base_url, api_format, auth_header, anthropic_version)
+    CUSTOM_PROVIDERS[prefix] = {"name": name, "base_url": base_url, "api_format": api_format, "auth_header": auth_header, "anthropic_version": anthropic_version, "models": []}
     CUSTOM_PROVIDER_KEYS[prefix] = []
     custom_key_index[prefix] = 0
     # A brand new prefix can't collide with a disabled built-in, but clear

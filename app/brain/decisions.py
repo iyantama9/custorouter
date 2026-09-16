@@ -26,11 +26,14 @@ class DecisionTracker:
 
     # Fact patterns (user preferences, information)
     FACT_PATTERNS = [
-        r"(?i)I (?:prefer|like|love|want|need) (.+)",
-        r"(?i)My (.+) is (.+)",
-        r"(?i)I (?:am|work as|do) (.+)",
-        r"(?i)I'm using (.+)",
-        r"(?i)The project (?:uses|is using|has) (.+)",
+        (r"(?i)I (?:prefer|like|love|want|need) (.+)", "preference"),
+        (r"(?i)My (.+) is (.+)", "profile"),
+        (r"(?i)I (?:am|work as|do) (.+)", "profile"),
+        (r"(?i)I'm using (.+)", "technology"),
+        (r"(?i)The project (?:uses|is using|has) (.+)", "project"),
+        (r"(?i)(?:Aku|Saya) (?:lebih suka|suka|ingin|butuh|mau) (.+)", "preference"),
+        (r"(?i)(?:Aku|Saya) (?:pakai|menggunakan) (.+)", "technology"),
+        (r"(?i)(?:Aku|Saya) bekerja sebagai (.+)", "profile"),
     ]
 
     # Outcome feedback patterns - signal whether the previous exchange landed well.
@@ -67,6 +70,9 @@ class DecisionTracker:
             session_id: Session ID
             role: Message role (decisions usually from user or assistant)
         """
+        # The assistant's proposals are not the user's decisions.
+        if role != "user":
+            return 0
         decisions = DecisionTracker.extract_decisions(content)
 
         for decision in decisions:
@@ -78,6 +84,7 @@ class DecisionTracker:
                 context=decision.get("context"),
                 decision_type=decision.get("type")
             )
+        return len(decisions)
 
     @staticmethod
     def extract_decisions(content: str) -> List[Dict[str, Any]]:
@@ -91,11 +98,12 @@ class DecisionTracker:
             List of extracted decisions
         """
         decisions = []
+        content = DecisionTracker._memory_candidate_text(content)
 
         for pattern, decision_type in DecisionTracker.DECISION_PATTERNS:
             matches = re.findall(pattern, content)
             for match in matches:
-                decision_text = match.strip()
+                decision_text = DecisionTracker._clean_capture(match)
                 if len(decision_text) > 10:  # Filter out too short matches
                     decisions.append({
                         "title": decision_text[:200],  # Truncate long titles
@@ -122,10 +130,13 @@ class DecisionTracker:
             session_id: Session ID
             role: Message role (facts usually from user messages)
         """
+        if role != "user":
+            return 0
         facts = DecisionTracker.extract_facts(content)
 
+        saved = 0
         for fact in facts:
-            await BrainStorage.save_fact(
+            was_saved = await BrainStorage.save_fact(
                 api_key_hash=api_key_hash,
                 session_id=session_id,
                 fact=fact["fact"],
@@ -133,6 +144,8 @@ class DecisionTracker:
                 source=f"conversation_{session_id}",
                 confidence=fact.get("confidence", 0.8)
             )
+            saved += bool(was_saved)
+        return saved
 
     @staticmethod
     def extract_facts(content: str) -> List[Dict[str, Any]]:
@@ -146,19 +159,13 @@ class DecisionTracker:
             List of extracted facts
         """
         facts = []
+        content = DecisionTracker._memory_candidate_text(content)
 
-        for pattern in DecisionTracker.FACT_PATTERNS:
-            matches = re.findall(pattern, content)
-            for match in matches:
-                if isinstance(match, tuple):
-                    fact_text = " ".join(match).strip()
-                else:
-                    fact_text = match.strip()
+        for pattern, category in DecisionTracker.FACT_PATTERNS:
+            for match in re.finditer(pattern, content):
+                fact_text = DecisionTracker._clean_capture(match.group(0))
 
                 if len(fact_text) > 5:  # Filter out too short matches
-                    # Determine category based on content
-                    category = DecisionTracker._categorize_fact(fact_text)
-
                     facts.append({
                         "fact": fact_text[:500],  # Truncate long facts
                         "category": category,
@@ -166,6 +173,19 @@ class DecisionTracker:
                     })
 
         return facts
+
+    @staticmethod
+    def _memory_candidate_text(content: str) -> str:
+        """Avoid treating quoted examples or code as durable user preferences."""
+        without_code = re.sub(r"```[\s\S]*?```", "", content)
+        return "\n".join(
+            line for line in without_code.splitlines()
+            if not line.lstrip().startswith((">", "    "))
+        )[:8000]
+
+    @staticmethod
+    def _clean_capture(value: str) -> str:
+        return re.split(r"[.!?](?:\s|$)", value.strip(), maxsplit=1)[0].strip()[:500]
 
     @staticmethod
     def _categorize_fact(fact_text: str) -> str:
@@ -213,7 +233,7 @@ class DecisionTracker:
         """
         sentiment = DecisionTracker.detect_outcome_feedback(content)
         if not sentiment:
-            return
+            return False
 
         # Resolve the most recent still-open decision for this session, if any.
         open_decision = await BrainStorage.get_latest_unresolved_decision(
@@ -226,7 +246,7 @@ class DecisionTracker:
         # Tie the feedback to the model that produced the previous reply.
         last_model = await BrainStorage.get_last_assistant_model(session_id)
         if not last_model:
-            return
+            return bool(open_decision)
 
         model_ref = last_model.split("/", 1)[1] if "/" in last_model else last_model
         await BrainStorage.save_decision(
@@ -239,6 +259,7 @@ class DecisionTracker:
             outcome=sentiment,
             model_ref=model_ref
         )
+        return True
 
     @staticmethod
     async def analyze_conversation(
@@ -257,7 +278,7 @@ class DecisionTracker:
             role: Message role
         """
         # Extract and save decisions
-        await DecisionTracker.extract_and_save_decisions(
+        new_decisions = await DecisionTracker.extract_and_save_decisions(
             content=content,
             api_key_hash=api_key_hash,
             session_id=session_id,
@@ -267,18 +288,19 @@ class DecisionTracker:
         # Extract and save facts, resolve outcomes, and refresh the cached
         # profile — all from the user's side of the conversation.
         if role == "user":
-            await DecisionTracker.extract_and_save_facts(
+            new_facts = await DecisionTracker.extract_and_save_facts(
                 content=content,
                 api_key_hash=api_key_hash,
                 session_id=session_id,
                 role=role
             )
-            await DecisionTracker.apply_outcome_feedback(
+            feedback_changed = await DecisionTracker.apply_outcome_feedback(
                 content=content,
                 api_key_hash=api_key_hash,
                 session_id=session_id
             )
-            await DecisionTracker.get_user_profile(api_key_hash, persist=True)
+            if new_facts or new_decisions or feedback_changed:
+                await DecisionTracker.get_user_profile(api_key_hash, persist=True)
 
     @staticmethod
     async def get_user_profile(api_key_hash: str, persist: bool = False) -> Dict[str, Any]:
