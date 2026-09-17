@@ -2690,18 +2690,20 @@ function dashboard() {
     ensureMarkdownLibraries() {
       if (window.marked && window.DOMPurify) return Promise.resolve();
       if (this._markdownPromise) return this._markdownPromise;
-      const load = (src, ready) => new Promise((resolve, reject) => {
+      const load = (src, integrity, ready) => new Promise((resolve, reject) => {
         if (ready()) { resolve(); return; }
         const script = document.createElement('script');
         script.src = src;
+        script.integrity = integrity;
+        script.crossOrigin = 'anonymous';
         script.async = true;
         script.onload = resolve;
         script.onerror = reject;
         document.head.appendChild(script);
       });
       this._markdownPromise = Promise.all([
-        load('https://cdn.jsdelivr.net/npm/marked@18.0.13/lib/marked.umd.js', () => !!window.marked),
-        load('https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js', () => !!window.DOMPurify),
+        load('https://cdn.jsdelivr.net/npm/marked@18.0.13/lib/marked.umd.js', 'sha384-Jy8qDMspJASzATgFngF2ompIKy0StbCcvuTE65mxDm/E0/YSIF6Ndc+5V7bbwRcw', () => !!window.marked),
+        load('https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js', 'sha384-uUMu9JDY09vBzRf9SPcK2VgUj+W/70J6Soc+Dded5P474ElQ63iv9j5N3DE7Kp3N', () => !!window.DOMPurify),
       ]).catch(() => {
         this.toast('Markdown renderer failed to load', 'error');
       });

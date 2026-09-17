@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Request, Body
 from fastapi.responses import JSONResponse
 
-from app.config import ROUTER_PASSWORD
+from app.routers.proxy import _check_router_auth as _check_proxy_auth
 from app.brain.semantic import SemanticSearch
 from app.brain.memory import MemoryManager
 from app.brain.decisions import DecisionTracker
@@ -23,13 +23,9 @@ from app.brain.middleware import BrainMiddleware, get_brain_stats
 router = APIRouter(prefix="/brain", tags=["brain"])
 
 
-def _check_router_auth(request: Request):
-    """Check router authentication"""
-    auth_header = request.headers.get("Authorization")
-    x_api_key = request.headers.get("x-api-key")
-    if ROUTER_PASSWORD and auth_header != f"Bearer {ROUTER_PASSWORD}" and x_api_key != ROUTER_PASSWORD:
-        return False
-    return True
+async def _check_router_auth(request: Request):
+    """Use the same router-key validation as the model proxy endpoints."""
+    return await _check_proxy_auth(request)
 
 
 def _get_api_key_hash(request: Request) -> Optional[str]:
@@ -76,7 +72,7 @@ async def search_conversations(request: Request, body: dict = Body(...)):
         limit: Maximum results (default 10)
         min_similarity: Minimum similarity threshold (default 0.3)
     """
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -115,7 +111,7 @@ async def search_decisions(request: Request, body: dict = Body(...)):
         query: Search query text
         limit: Maximum results (default 10)
     """
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -151,7 +147,7 @@ async def search_facts(request: Request, body: dict = Body(...)):
         category: Optional category filter
         limit: Maximum results (default 10)
     """
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -182,7 +178,7 @@ async def search_facts(request: Request, body: dict = Body(...)):
 @router.get("/profile")
 async def get_profile(request: Request):
     """Get user profile built from brain data"""
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -197,7 +193,7 @@ async def get_profile(request: Request):
 @router.get("/session/{session_id}/summary")
 async def get_session_summary(request: Request, session_id: int):
     """Get session summary with brain data"""
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -226,7 +222,7 @@ async def create_decision(request: Request, body: dict = Body(...)):
         decision_type: Optional type
         session_id: Optional session ID
     """
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -262,7 +258,7 @@ async def create_fact(request: Request, body: dict = Body(...)):
         confidence: Optional confidence (0-1)
         session_id: Optional session ID
     """
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -293,7 +289,7 @@ async def list_decisions(
     limit: int = 50
 ):
     """List decisions with optional filters"""
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)
@@ -318,7 +314,7 @@ async def list_facts(
     limit: int = 100
 ):
     """List facts with optional filters"""
-    if not _check_router_auth(request):
+    if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     api_key_hash = _get_api_key_hash(request)

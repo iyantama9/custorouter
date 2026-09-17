@@ -41,6 +41,26 @@ MAX_REQUEST_BODY_BYTES = max(1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(2
 _RETRYABLE_UPSTREAM_STATUSES = {401, 402, 403, 404, 429, 500, 502, 503, 504}
 
 
+def _should_retry_custom_key(status_code: int, body) -> bool:
+    """Retry another key for transient failures or quota-like HTTP 400s."""
+    if status_code in _RETRYABLE_UPSTREAM_STATUSES:
+        return True
+    if status_code != 400:
+        return False
+    try:
+        detail = json.dumps(body, ensure_ascii=False).lower()[:4096]
+    except (TypeError, ValueError):
+        detail = str(body).lower()[:4096]
+    quota_terms = (
+        "out of credit", "out_of_credit", "out of credits",
+        "insufficient credit", "insufficient balance", "credits exhausted",
+        "credit exhausted", "no credits left", "quota exceeded",
+        "quota_exceeded", "insufficient_quota", "billing limit",
+        "余额不足", "积分不足",
+    )
+    return any(term in detail for term in quota_terms)
+
+
 def _is_qc_model_quota_error(status_code: int, body) -> bool:
     """Only model quota failures permanently exclude a QC key/model pair."""
     if status_code in (402, 429):
@@ -427,7 +447,7 @@ def _final_stream_tokens(tracker: dict) -> tuple[int, int]:
 # Connect fails fast (a live host completes TCP+TLS in well under this);
 # read stays generous since legitimate generation can genuinely take a
 # while.
-async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, display_model: str = None, anthropic_headers=None):
+async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, display_model: str = None, anthropic_headers=None, retry_state=None):
     """
     Send an Anthropic-shaped request to an admin-added custom provider and
     return an Anthropic-shaped result, regardless of whether that provider
@@ -445,9 +465,12 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
     if not info:
         return "json", 400, {"error": {"message": f"Unknown provider '{prefix}'"}}
 
-    keys = config_module.CUSTOM_PROVIDER_KEYS.get(prefix) or []
+    keys = list(config_module.CUSTOM_PROVIDER_KEYS.get(prefix) or [])
     if not keys:
         return "json", 500, {"error": {"message": f"No API keys configured for provider '{prefix}'"}}
+    first_key = config_module.get_current_custom_key(prefix)
+    start_index = keys.index(first_key) if first_key in keys else 0
+    keys = keys[start_index:] + keys[:start_index]
 
     base_url = info["base_url"]
     api_format = info["api_format"]
@@ -460,8 +483,7 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
 
     last_status, last_body = 502, {"error": {"message": "All configured keys for this provider failed."}}
 
-    for attempt in range(len(keys)):
-        key = config_module.get_current_custom_key(prefix)
+    for attempt, key in enumerate(keys):
         headers = config_module.custom_provider_headers(info, key, anthropic_headers)
 
         try:
@@ -573,26 +595,30 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
         except Exception as e:
             last_status, last_body = 502, {"error": {"message": f"{type(e).__name__}: {e}"}}
 
-        if last_status in _RETRYABLE_UPSTREAM_STATUSES and attempt < len(keys) - 1:
+        if _should_retry_custom_key(last_status, last_body) and attempt < len(keys) - 1:
             config_module.rotate_custom_key(prefix)
+            if retry_state is not None:
+                retry_state["rotated"] = True
         else:
             break
 
     return "json", last_status, last_body
 
 
-async def _dispatch_custom_openai(prefix: str, payload: dict, stream: bool):
+async def _dispatch_custom_openai(prefix: str, payload: dict, stream: bool, retry_state=None):
     """Forward an OpenAI request to an OpenAI provider without translating it."""
     info = config_module.CUSTOM_PROVIDERS[prefix]
-    keys = config_module.CUSTOM_PROVIDER_KEYS.get(prefix) or []
+    keys = list(config_module.CUSTOM_PROVIDER_KEYS.get(prefix) or [])
     if not keys:
         return "json", 500, {"error": {"message": f"No API keys configured for provider '{prefix}'"}}, None
+    first_key = config_module.get_current_custom_key(prefix)
+    start_index = keys.index(first_key) if first_key in keys else 0
+    keys = keys[start_index:] + keys[:start_index]
 
     url = f"{info['base_url']}/chat/completions"
     last_status = 502
     last_body = {"error": {"message": "All configured keys for this provider failed."}}
-    for attempt in range(len(keys)):
-        key = config_module.get_current_custom_key(prefix)
+    for attempt, key in enumerate(keys):
         headers = config_module.custom_provider_headers(info, key)
         try:
             if stream:
@@ -624,8 +650,10 @@ async def _dispatch_custom_openai(prefix: str, payload: dict, stream: bool):
             last_status = 502
             last_body = {"error": {"message": f"Upstream connection failed: {type(exc).__name__}"}}
 
-        if last_status in _RETRYABLE_UPSTREAM_STATUSES and attempt < len(keys) - 1:
+        if _should_retry_custom_key(last_status, last_body) and attempt < len(keys) - 1:
             config_module.rotate_custom_key(prefix)
+            if retry_state is not None:
+                retry_state["rotated"] = True
         else:
             break
 
@@ -810,8 +838,10 @@ async def messages(request: Request):
             payload["model"] = requested_model_raw[len(cprefix) + 1:]
             want_stream = bool(payload.get("stream"))
             start_req_time = time.time()
+            retry_state = {}
             kind, status, body = await _dispatch_custom_provider(
-                cprefix, payload, want_stream, display_model, request.headers
+                cprefix, payload, want_stream, display_model, request.headers,
+                retry_state=retry_state,
             )
             log_model = f"{cprefix}/{payload['model']}"
             # Echo the alias back rather than the real model id.
@@ -843,7 +873,7 @@ async def messages(request: Request):
                     finally:
                         input_tokens, output_tokens = _final_stream_tokens(tracker)
                         add_request_log(
-                            log_model, status, "custom", False,
+                            log_model, status, "custom", retry_state.get("rotated", False),
                             int((time.time() - start_req_time) * 1000),
                             input_tokens, output_tokens, provider=cprefix,
                         )
@@ -854,7 +884,7 @@ async def messages(request: Request):
             input_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0) or 0
             output_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0) or 0
             add_request_log(
-                log_model, status, "custom", False, elapsed_ms,
+                log_model, status, "custom", retry_state.get("rotated", False), elapsed_ms,
                 input_tokens, output_tokens,
                 provider=cprefix,
             )
@@ -1597,6 +1627,7 @@ async def _relay_openai_upstream_stream(
     request: Request,
     strip_thinking: bool = True,
     input_tokens_estimate: int = 0,
+    rotated: bool = False,
 ):
     """Relay an already-open upstream SSE response and account for usage."""
     import re
@@ -1672,7 +1703,7 @@ async def _relay_openai_upstream_stream(
             requested_model,
             200,
             current_key,
-            False,
+            rotated,
             total_ms,
             token_usage["prompt_tokens"],
             token_usage["completion_tokens"],
@@ -1727,8 +1758,9 @@ async def chat_completions(request: Request):
             if config_module.CUSTOM_PROVIDERS[cprefix]["api_format"] == "openai":
                 upstream_payload = {**payload, "model": model_name}
                 start_req_time = time.time()
+                retry_state = {}
                 kind, status, body, current_key = await _dispatch_custom_openai(
-                    cprefix, upstream_payload, bool(payload.get("stream"))
+                    cprefix, upstream_payload, bool(payload.get("stream")), retry_state=retry_state,
                 )
                 log_model = f"{cprefix}/{model_name}"
                 if kind == "stream":
@@ -1743,6 +1775,7 @@ async def chat_completions(request: Request):
                             request=request,
                             strip_thinking=False,
                             input_tokens_estimate=estimate_tokens(upstream_payload),
+                            rotated=retry_state.get("rotated", False),
                         ),
                         media_type="text/event-stream",
                     )
@@ -1750,7 +1783,7 @@ async def chat_completions(request: Request):
                 input_tokens = usage.get("prompt_tokens", 0) or 0
                 output_tokens = usage.get("completion_tokens", 0) or 0
                 add_request_log(
-                    log_model, status, "custom", False,
+                    log_model, status, "custom", retry_state.get("rotated", False),
                     int((time.time() - start_req_time) * 1000),
                     input_tokens, output_tokens, provider=cprefix,
                 )
@@ -1792,14 +1825,16 @@ async def chat_completions(request: Request):
                 anthropic_payload.setdefault("tool_choice", {"type": "auto"})["disable_parallel_tool_use"] = True
             want_stream = bool(payload.get("stream"))
             start_req_time = time.time()
+            retry_state = {}
             kind, status, body = await _dispatch_custom_provider(
-                cprefix, anthropic_payload, want_stream, display_model, request.headers
+                cprefix, anthropic_payload, want_stream, display_model, request.headers,
+                retry_state=retry_state,
             )
             log_model = f"{cprefix}/{model_name}"
             usage = (body or {}).get("usage") or {} if kind == "json" else {}
             if kind == "json":
                 add_request_log(
-                    log_model, status, "custom", False, int((time.time() - start_req_time) * 1000),
+                    log_model, status, "custom", retry_state.get("rotated", False), int((time.time() - start_req_time) * 1000),
                     usage.get("input_tokens", 0) or 0, usage.get("output_tokens", 0) or 0,
                     provider=cprefix,
                 )
@@ -1849,7 +1884,7 @@ async def chat_completions(request: Request):
                 finally:
                     input_tokens, output_tokens = _final_stream_tokens(tracker)
                     add_request_log(
-                        log_model, status, "custom", False,
+                        log_model, status, "custom", retry_state.get("rotated", False),
                         int((time.time() - start_req_time) * 1000),
                         input_tokens, output_tokens, provider=cprefix,
                     )

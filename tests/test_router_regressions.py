@@ -9,11 +9,101 @@ from app import database
 from app import config
 from app.translator import build_openai_request, stream_as_anthropic, to_anthropic_response
 from app.translator_openai import openai_tool_choice_to_anthropic, openai_tools_to_anthropic
-from app.routers import admin, proxy
+from app.routers import admin, brain, proxy
 from app.sse import SSEBroadcaster
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _login_request(payload, ip):
+        async def receive():
+            return {"type": "http.request", "body": json.dumps(payload).encode(), "more_body": False}
+
+        return Request({"type": "http", "method": "POST", "path": "/api/login", "headers": [],
+                        "client": (ip, 12345)}, receive)
+
+    def setUp(self):
+        admin._login_attempts.clear()
+        admin._global_login_attempts.clear()
+        admin._sessions.clear()
+
+    def tearDown(self):
+        admin._login_attempts.clear()
+        admin._global_login_attempts.clear()
+        admin._sessions.clear()
+
+    async def test_login_issues_revocable_random_session_not_server_secret(self):
+        request = self._login_request({"username": config.ADMIN_USERNAME, "password": "test"}, "198.51.100.8")
+        with patch.object(admin, "verify_admin_password", return_value=True):
+            response = await admin.api_login(request)
+        self.assertEqual(response.status_code, 200)
+        cookie = response.headers["set-cookie"]
+        token = cookie.split("session_token=", 1)[1].split(";", 1)[0]
+        self.assertNotEqual(token, config.SESSION_SECRET)
+        self.assertTrue(admin._valid_session(token))
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("Secure", cookie)
+        await admin.api_logout(token)
+        self.assertFalse(admin._valid_session(token))
+
+    async def test_login_rate_limit_reserves_attempts_before_password_check(self):
+        with patch.object(admin, "verify_admin_password", return_value=False):
+            responses = [await admin.api_login(self._login_request({"username": "wrong", "password": "wrong"},
+                                                                      "198.51.100.9"))
+                         for _ in range(6)]
+        self.assertEqual([response.status_code for response in responses], [401] * 5 + [429])
+
+    def test_only_configured_proxy_can_supply_client_ip(self):
+        headers = [(b"x-real-ip", b"198.51.100.42"),
+                   (b"x-forwarded-for", b"203.0.113.7, 198.51.100.42")]
+        trusted = Request({"type": "http", "headers": headers, "client": ("172.18.0.1", 12345)})
+        untrusted = Request({"type": "http", "headers": headers, "client": ("172.18.0.2", 12345)})
+        with (patch.object(admin, "_TRUST_PROXY_HEADERS", True),
+              patch.object(admin, "_TRUSTED_PROXY_IPS", {"172.18.0.1"})):
+            self.assertEqual(admin._client_ip(trusted), "198.51.100.42")
+            self.assertEqual(admin._client_ip(untrusted), "172.18.0.2")
+
+    async def test_brain_rejects_missing_credentials(self):
+        request = Request({"type": "http", "method": "GET", "path": "/brain/profile", "headers": []})
+        response = await brain.get_profile(request)
+        self.assertEqual(response.status_code, 401)
+
+    async def test_login_rejects_oversized_body_before_json_parsing(self):
+        from app.main import app
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="https://router.example") as client:
+            response = await client.post("/api/login", content=b"x" * 5000,
+                                         headers={"Content-Type": "application/json"})
+        self.assertEqual(response.status_code, 413)
+
+    async def test_unicode_username_is_rejected_without_server_error(self):
+        request = self._login_request({"username": "用户", "password": "test"}, "198.51.100.10")
+        with patch.object(admin, "verify_admin_password", return_value=True):
+            response = await admin.api_login(request)
+        self.assertEqual(response.status_code, 401)
+
+    async def test_bcrypt_rejecting_long_password_does_not_crash_login(self):
+        request = self._login_request({"username": config.ADMIN_USERNAME, "password": "x" * 100},
+                                      "198.51.100.11")
+        with patch.object(admin, "verify_admin_password", side_effect=ValueError("password too long")):
+            response = await admin.api_login(request)
+        self.assertEqual(response.status_code, 401)
+
+    async def test_forwarded_host_cannot_bypass_admin_origin_check(self):
+        from app.main import app
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://router.example",
+                                     cookies={"session_token": "not-a-real-session"}) as client:
+            response = await client.post(
+                "/api/logout",
+                headers={"Origin": "https://attacker.example", "X-Forwarded-Host": "attacker.example"},
+            )
+        self.assertEqual(response.status_code, 403)
 
 
 class HttpClientLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -293,6 +383,125 @@ class ProviderTransparencyTests(unittest.TestCase):
 
 
 class CustomProviderForwardingTests(unittest.IsolatedAsyncioTestCase):
+    def test_quota_wrapped_in_400_retries_but_bad_payload_does_not(self):
+        self.assertTrue(proxy._should_retry_custom_key(400, {
+            "error": {"code": "out_of_credit", "message": "Out of credit"}
+        }))
+        self.assertFalse(proxy._should_retry_custom_key(400, {
+            "error": {"message": "Invalid messages payload"}
+        }))
+
+    async def test_custom_openai_quota_400_tries_every_key_until_success(self):
+        seen = []
+
+        def handle(request):
+            seen.append(request.headers["authorization"])
+            if len(seen) < 3:
+                return httpx.Response(400, json={"error": {"code": "out_of_credit"}})
+            return httpx.Response(200, json={"choices": [], "usage": {}})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        retry_state = {}
+        try:
+            with (
+                patch.dict(config.CUSTOM_PROVIDERS, {"bi": {"base_url": "https://provider.test/v1", "api_format": "openai"}}),
+                patch.dict(config.CUSTOM_PROVIDER_KEYS, {"bi": ["key-1", "key-2", "key-3"]}),
+                patch.object(config, "get_current_custom_key", return_value="key-1"),
+                patch.object(config, "rotate_custom_key") as rotate,
+                patch.object(proxy, "_custom_client", client),
+            ):
+                kind, status, _, key = await proxy._dispatch_custom_openai(
+                    "bi", {"model": "example", "messages": []}, False, retry_state=retry_state
+                )
+        finally:
+            await client.aclose()
+
+        self.assertEqual((kind, status, key), ("json", 200, "key-3"))
+        self.assertEqual(seen, ["Bearer key-1", "Bearer key-2", "Bearer key-3"])
+        self.assertEqual(rotate.call_count, 2)
+        self.assertTrue(retry_state["rotated"])
+
+    async def test_custom_openai_validation_400_does_not_rotate(self):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(400, json={"error": {"message": "Invalid payload"}})
+        ))
+        try:
+            with (
+                patch.dict(config.CUSTOM_PROVIDERS, {"bi": {"base_url": "https://provider.test/v1", "api_format": "openai"}}),
+                patch.dict(config.CUSTOM_PROVIDER_KEYS, {"bi": ["key-1", "key-2"]}),
+                patch.object(config, "get_current_custom_key", return_value="key-1"),
+                patch.object(config, "rotate_custom_key") as rotate,
+                patch.object(proxy, "_custom_client", client),
+            ):
+                _, status, _, _ = await proxy._dispatch_custom_openai(
+                    "bi", {"model": "example", "messages": []}, False
+                )
+        finally:
+            await client.aclose()
+        self.assertEqual(status, 400)
+        rotate.assert_not_called()
+
+    async def test_custom_openai_stream_quota_tries_all_keys(self):
+        seen = []
+
+        def handle(request):
+            seen.append(request.headers["authorization"])
+            if len(seen) < 3:
+                return httpx.Response(400, json={"error": {"message": "Out of credit"}})
+            return httpx.Response(200, text="data: [DONE]\n\n")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        retry_state = {}
+        try:
+            with (
+                patch.dict(config.CUSTOM_PROVIDERS, {"bi": {"base_url": "https://provider.test/v1", "api_format": "openai"}}),
+                patch.dict(config.CUSTOM_PROVIDER_KEYS, {"bi": ["key-1", "key-2", "key-3"]}),
+                patch.object(config, "get_current_custom_key", return_value="key-2"),
+                patch.object(config, "rotate_custom_key") as rotate,
+                patch.object(proxy, "_custom_client", client),
+            ):
+                kind, status, response, key = await proxy._dispatch_custom_openai(
+                    "bi", {"model": "example", "messages": [], "stream": True}, True,
+                    retry_state=retry_state,
+                )
+                await response.aclose()
+        finally:
+            await client.aclose()
+
+        self.assertEqual((kind, status, key), ("stream", 200, "key-1"))
+        self.assertEqual(seen, ["Bearer key-2", "Bearer key-3", "Bearer key-1"])
+        self.assertEqual(rotate.call_count, 2)
+        self.assertTrue(retry_state["rotated"])
+
+    async def test_custom_anthropic_quota_tries_all_keys_before_failure(self):
+        seen = []
+
+        def handle(request):
+            seen.append(request.headers["x-api-key"])
+            return httpx.Response(400, json={"error": {"message": "Insufficient balance"}})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        retry_state = {}
+        try:
+            with (
+                patch.dict(config.CUSTOM_PROVIDERS, {"third": {"base_url": "https://provider.test/v1", "api_format": "anthropic", "auth_header": "x-api-key"}}),
+                patch.dict(config.CUSTOM_PROVIDER_KEYS, {"third": ["key-1", "key-2", "key-3"]}),
+                patch.object(config, "get_current_custom_key", return_value="key-1"),
+                patch.object(config, "rotate_custom_key") as rotate,
+                patch.object(proxy, "_custom_client", client),
+            ):
+                kind, status, _ = await proxy._dispatch_custom_provider(
+                    "third", {"model": "example", "messages": [], "max_tokens": 10}, False,
+                    retry_state=retry_state,
+                )
+        finally:
+            await client.aclose()
+
+        self.assertEqual((kind, status), ("json", 400))
+        self.assertEqual(seen, ["key-1", "key-2", "key-3"])
+        self.assertEqual(rotate.call_count, 2)
+        self.assertTrue(retry_state["rotated"])
+
     async def test_third_party_model_probe_uses_configured_auth(self):
         sent = []
 
@@ -459,6 +668,30 @@ class CustomProviderForwardingTests(unittest.IsolatedAsyncioTestCase):
         sent = dispatch.await_args.args[1]
         self.assertEqual(sent, {**body, "model": "example"})
         self.assertEqual(response.status_code, 200)
+
+    async def test_openai_route_logs_custom_key_rotation(self):
+        body = {"model": "test/example", "messages": [{"role": "user", "content": "Hi"}]}
+        request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
+
+        async def dispatch(_prefix, _payload, _stream, *, retry_state):
+            retry_state["rotated"] = True
+            return "json", 200, {"model": "example", "choices": [], "usage": {}}, "key-2"
+
+        with (
+            patch.dict(config.CUSTOM_PROVIDERS, {"test": {"api_format": "openai"}}),
+            patch.object(proxy, "_check_router_auth", AsyncMock(return_value=True)),
+            patch.object(proxy, "_read_json_payload", AsyncMock(return_value=(body, None))),
+            patch.object(proxy, "_model_allowed_for_key", return_value=None),
+            patch.object(proxy, "_key_model_prompt", return_value=""),
+            patch.object(proxy, "_dispatch_custom_openai", side_effect=dispatch),
+            patch.object(proxy, "add_request_log") as log,
+            patch.object(proxy, "_bill_router_key", AsyncMock()),
+            patch.object(proxy, "_broadcast_request_log", AsyncMock()),
+        ):
+            response = await proxy.chat_completions(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(log.call_args.args[3])
 
     async def test_openai_to_anthropic_keeps_sampling_limits_and_tool_policy(self):
         body = {

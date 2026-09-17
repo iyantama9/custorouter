@@ -8,8 +8,8 @@ CustoRouter handles provider credentials, managed client keys, administrator ses
 
 - Provider and router secrets can be loaded from environment configuration or protected database fields used by the application.
 - Admin passwords are verified with bcrypt.
-- Admin sessions use `HttpOnly`, `Secure`, `SameSite=Strict` cookies.
-- Login attempts are rate limited within the application process.
+- Admin sessions use random, revocable, 12-hour tokens in `HttpOnly`, `Secure`, `SameSite=Strict` cookies. Sessions expire on process restart.
+- Login attempts are limited to 5 per client IP per 15 minutes and 30 total per minute within the application process.
 - Managed client keys support expiration, quota, model allowlists, aliases, and prompts.
 - Brain ownership uses a hash of the calling key.
 - Dashboard mutation routes require an authenticated admin session.
@@ -17,8 +17,8 @@ CustoRouter handles provider credentials, managed client keys, administrator ses
 ## Required production hardening
 
 1. Replace all example and fixed credentials before deployment.
-2. Remove the PostgreSQL host port or bind it to a private interface. The current Compose file publishes `5432:5432`.
-3. Replace the fixed Compose database password and rotate any environment that has used it.
+2. Keep PostgreSQL bound to loopback/private networking; the current Compose file binds it to `127.0.0.1:5432`.
+3. Set a unique `POSTGRES_PASSWORD` in `.env`.
 4. Terminate TLS at a maintained reverse proxy and redirect HTTP to HTTPS.
 5. Restrict dashboard access with a VPN, private network, or additional identity-aware proxy.
 6. Store `.env`, backups, exports, and logs with least-privilege filesystem permissions.
@@ -26,16 +26,17 @@ CustoRouter handles provider credentials, managed client keys, administrator ses
 8. Use a shared rate limiter if more than one application process serves login traffic.
 9. Set retention limits for request logs, playground data, and Brain memory.
 10. Rotate provider and router keys after suspected exposure.
+11. If `TRUST_PROXY_HEADERS=true`, set `TRUSTED_PROXY_IPS` to the exact address(es) of the reverse proxy as seen by the app (for Docker this is often the bridge gateway). Nginx must overwrite `X-Real-IP` with `$remote_addr`. Otherwise the login limiter groups users under the proxy IP.
 
 ## Known gaps
 
-- PostgreSQL is published on the host by the included Compose file.
-- The Compose database password is fixed in source and unsuitable for production.
 - Login throttling is in-memory and does not coordinate across replicas or survive restart.
+- Admin sessions are in-memory and require sticky routing or a shared session store with more than one app worker.
+- Dashboard scripts still load from third-party CDNs, although their bytes are pinned with Subresource Integrity. The CSP permits inline/eval scripts for the current frontend architecture; migrate to self-hosted scripts and a nonce-based CSP for stronger XSS isolation.
 - No repository-wide security test suite currently exercises all provider adapters and admin mutations.
 - Startup-time schema changes do not provide the auditability and rollback guarantees of versioned migrations.
 - Custom-provider Brain coverage is incomplete.
-- Direct Brain routes do not validate managed client-key expiry, quota, or allowlists; they use the configured global router password check.
+- Managed client-key token quotas are checked before and billed after inference, so concurrent requests can overrun a strict quota.
 
 These are deployment and engineering tasks, not implied guarantees. Operators must assess the exact deployed revision and network topology.
 

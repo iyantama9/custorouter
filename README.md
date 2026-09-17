@@ -67,7 +67,7 @@ Brain work is best effort on the inference path. A Brain failure does not replac
 | Anthropic-compatible messages | `POST /v1/messages` | Router client key |
 | Token count | `POST /v1/messages/count_tokens` | Router client key |
 | Brain status | `GET /brain/health` | Public health route |
-| Brain records and search | `/brain/*` | Router password boundary and key-derived scope |
+| Brain records and search | `/brain/*` | Router client-key validation and key-derived scope |
 | Operator dashboard | `/dashboard` | Admin session |
 | Live operator events | `/api/sse` | Admin session |
 
@@ -89,7 +89,7 @@ Policy is applied before an upstream credential is used. Aliases resolve before 
 
 Brain groups data by a hash derived from the supplied client credential. It can retain conversation context, decisions, facts, session summaries, and profile information, then retrieve relevant records semantically. Raw client credentials are not used as Brain record identifiers.
 
-The direct Brain API currently uses the configured router password check instead of the full managed-key validator. Do not expose Brain routes broadly until this boundary matches the intended deployment policy. See [Brain integration](BRAIN_INTEGRATION.md) and [Security](docs/SECURITY.md).
+The direct Brain API uses the same managed-key validator as inference routes. Records remain scoped to a hash of the calling credential. See [Brain integration](BRAIN_INTEGRATION.md) and [Security](docs/SECURITY.md).
 
 ## Operator dashboard
 

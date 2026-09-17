@@ -1,7 +1,8 @@
 import json
-import hmac
 import ipaddress
+import hashlib
 import os
+import secrets
 import time
 from typing import AsyncGenerator
 
@@ -19,7 +20,7 @@ from app.config import (
     recent_requests,
     add_api_key, remove_api_key, bulk_remove_api_keys, reset_key_status, get_masked_keys, set_active_key,
     add_custom_provider, remove_provider,
-    SESSION_SECRET, ADMIN_USERNAME, verify_admin_password, get_paginated_logs,
+    ADMIN_USERNAME, verify_admin_password, get_paginated_logs,
 )
 from app.sse import sse_broadcaster
 from app.database import (
@@ -33,38 +34,71 @@ templates = Jinja2Templates(directory="templates")
 
 
 _login_attempts: dict[str, list[float]] = {}
-_LOGIN_MAX_ATTEMPTS = 10
-_LOGIN_WINDOW_SECONDS = 60
+_global_login_attempts: list[float] = []
+_sessions: dict[str, float] = {}
+_password_checks = asyncio.Semaphore(3)
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_GLOBAL_MAX_ATTEMPTS = 30
+_LOGIN_WINDOW_SECONDS = 15 * 60
+_LOGIN_GLOBAL_WINDOW_SECONDS = 60
+_SESSION_TTL_SECONDS = 12 * 60 * 60
 _TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
+_TRUSTED_PROXY_IPS = {
+    address.strip() for address in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
+    if address.strip()
+}
 
 
 def _client_ip(request: Request) -> str:
-    if _TRUST_PROXY_HEADERS:
-        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    peer = request.client.host if request.client else "unknown"
+    # Only a local reverse proxy may supply the client address. X-Forwarded-For
+    # is intentionally ignored: clients can prepend arbitrary entries to it.
+    if _TRUST_PROXY_HEADERS and peer in _TRUSTED_PROXY_IPS:
+        forwarded = request.headers.get("x-real-ip", "").strip()
         try:
             return str(ipaddress.ip_address(forwarded))
         except ValueError:
             pass
-    return request.client.host if request.client else "unknown"
+    return peer
 
 
 def _check_login_rate_limit(ip: str) -> bool:
     now = time.time()
-    attempts = _login_attempts.get(ip, [])
-    attempts = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
-    _login_attempts[ip] = attempts
-    return len(attempts) < _LOGIN_MAX_ATTEMPTS
+    cutoff = now - _LOGIN_WINDOW_SECONDS
+    _global_login_attempts[:] = [t for t in _global_login_attempts if t > now - _LOGIN_GLOBAL_WINDOW_SECONDS]
+    for address, attempts in list(_login_attempts.items()):
+        recent = [t for t in attempts if t > cutoff]
+        if recent:
+            _login_attempts[address] = recent
+        else:
+            del _login_attempts[address]
+    return (len(_login_attempts.get(ip, [])) < _LOGIN_MAX_ATTEMPTS
+            and len(_global_login_attempts) < _LOGIN_GLOBAL_MAX_ATTEMPTS)
 
 
 def _record_login_attempt(ip: str):
     now = time.time()
-    attempts = _login_attempts.get(ip, [])
-    attempts.append(now)
-    _login_attempts[ip] = attempts
+    _login_attempts.setdefault(ip, []).append(now)
+    _global_login_attempts.append(now)
+
+
+def _session_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _valid_session(token: str | None) -> bool:
+    if not token or len(token) > 128:
+        return False
+    digest = _session_hash(token)
+    expires_at = _sessions.get(digest, 0)
+    if expires_at <= time.time():
+        _sessions.pop(digest, None)
+        return False
+    return True
 
 
 async def require_auth(session_token: str = Cookie(default=None)):
-    if not session_token or not hmac.compare_digest(session_token, SESSION_SECRET):
+    if not _valid_session(session_token):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
 
@@ -101,49 +135,73 @@ async def get_root():
 
 @router.get("/login", response_class=HTMLResponse)
 async def get_login(request: Request, session_token: str = Cookie(default=None)):
-    if session_token and hmac.compare_digest(session_token, SESSION_SECRET):
+    if _valid_session(session_token):
         return RedirectResponse(url="/dashboard", status_code=303)
     return templates.TemplateResponse(request=request, name="login.html")
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request, session_token: str = Cookie(default=None)):
-    if not session_token or not hmac.compare_digest(session_token, SESSION_SECRET):
+    if not _valid_session(session_token):
         return RedirectResponse(url="/login", status_code=303)
     return templates.TemplateResponse(request=request, name="dashboard.html")
 
 
 @router.post("/api/login")
-async def api_login(request: Request, payload: dict = Body(...)):
+async def api_login(request: Request):
     client_ip = _client_ip(request)
     if not _check_login_rate_limit(client_ip):
         return JSONResponse(status_code=429, content={"success": False, "message": "Too many login attempts. Try again later."})
+    # Reserve the slot before bcrypt yields to another coroutine. Otherwise
+    # concurrent guesses can all pass the limit before any failure is counted.
+    _record_login_attempt(client_ip)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 4096:
+            return JSONResponse(status_code=413, content={"success": False, "message": "Request too large"})
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid credentials"})
     username = payload.get("username", "")
     password = payload.get("password", "")
     if not isinstance(username, str) or not isinstance(password, str) or len(username) > 100 or len(password) > 1024:
-        _record_login_attempt(client_ip)
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid credentials"})
     # bcrypt is intentionally expensive; run it outside the event loop so a
     # login attempt cannot pause proxy traffic for every other client.
-    password_ok = await asyncio.to_thread(verify_admin_password, password)
-    if hmac.compare_digest(username, ADMIN_USERNAME) and password_ok:
+    async with _password_checks:
+        try:
+            password_ok = await asyncio.to_thread(verify_admin_password, password)
+        except ValueError:
+            password_ok = False
+    if username == ADMIN_USERNAME and password_ok:
         _login_attempts.pop(client_ip, None)
+        now = time.time()
+        for digest, expires_at in list(_sessions.items()):
+            if expires_at <= now:
+                del _sessions[digest]
+        token = secrets.token_urlsafe(32)
+        _sessions[_session_hash(token)] = now + _SESSION_TTL_SECONDS
         return JSONResponse(
             content={"success": True},
             headers={
-                "Set-Cookie": f"session_token={SESSION_SECRET}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000; Priority=High"
+                "Set-Cookie": f"session_token={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={_SESSION_TTL_SECONDS}; Priority=High"
             }
         )
-    _record_login_attempt(client_ip)
     return JSONResponse(status_code=401, content={"success": False, "message": "Invalid credentials"})
 
 
 @router.post("/api/logout")
-async def api_logout():
+async def api_logout(session_token: str = Cookie(default=None)):
+    if session_token:
+        _sessions.pop(_session_hash(session_token), None)
     return JSONResponse(
         content={"success": True},
         headers={
-            "Set-Cookie": "session_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+            "Set-Cookie": "session_token=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"
         }
     )
 

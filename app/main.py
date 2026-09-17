@@ -97,7 +97,9 @@ async def security_and_observability_headers(request, call_next):
             return JSONResponse(status_code=403, content={"error": "Cross-site request blocked."})
         origin = request.headers.get("origin")
         if origin:
-            host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+            # Do not trust X-Forwarded-Host from a client; it can be spoofed to
+            # make an attacker-controlled Origin appear same-site.
+            host = request.headers.get("host")
             allowed_origins = {f"https://{host}", f"http://{host}"}
             if origin.rstrip("/") not in allowed_origins:
                 return JSONResponse(status_code=403, content={"error": "Invalid request origin."})
