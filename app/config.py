@@ -109,7 +109,6 @@ NARA_BASE_URL = os.getenv("NARA_BASE_URL", "https://router.bynara.id/v1").rstrip
 DAHL_BASE_URL = os.getenv("DAHL_BASE_URL", "https://inference.dahl.global/v1").rstrip("/")
 QWEN_CLOUD_BASE_URL = os.getenv("QWEN_CLOUD_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1").rstrip("/")
 SHOW_REASONING = os.getenv("SHOW_REASONING", "true").lower() == "true"
-AUGMENT_SYSTEM_PROMPT = os.getenv("AUGMENT_SYSTEM_PROMPT", "false").lower() == "true"
 # Rotate key proactively if time-to-first-token exceeds this (ms). 0 = disabled.
 SLOW_RESPONSE_THRESHOLD_MS = int(os.getenv("SLOW_RESPONSE_THRESHOLD_MS", "10000"))
 # Minutes before a "Limited" key is automatically reset to "Standby". 0 = disabled.

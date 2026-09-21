@@ -8,7 +8,7 @@ from starlette.responses import StreamingResponse
 
 from app import database
 from app import config
-from app.translator import build_openai_request, stream_as_anthropic, to_anthropic_response
+from app.translator import build_openai_request, compact_messages, stream_as_anthropic, to_anthropic_response
 from app.translator_openai import (
     anthropic_to_openai_response,
     make_anthropic_to_openai_stream_converter,
@@ -402,8 +402,7 @@ class ProviderTransparencyTests(unittest.TestCase):
             "tools": [{"name": "lookup", "input_schema": {"type": "object"}, "strict": True}],
             "tool_choice": {"type": "none"},
         }
-        with patch.object(config, "AUGMENT_SYSTEM_PROMPT", False):
-            result = build_openai_request(body, provider="custom")
+        result = build_openai_request(body, provider="custom")
 
         self.assertEqual(result["max_tokens"], 32768)
         self.assertEqual(result["temperature"], 0.9)
@@ -419,11 +418,53 @@ class ProviderTransparencyTests(unittest.TestCase):
             "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
             "tool_choice": {"type": "tool", "name": "lookup", "disable_parallel_tool_use": True},
         }
-        with patch.object(config, "AUGMENT_SYSTEM_PROMPT", False):
-            result = build_openai_request(body, provider="custom")
+        result = build_openai_request(body, provider="custom")
 
         self.assertEqual(result["tool_choice"], {"type": "function", "function": {"name": "lookup"}})
         self.assertFalse(result["parallel_tool_calls"])
+
+    def test_router_never_injects_a_global_behavior_prompt(self):
+        body = {
+            "model": "example",
+            "messages": [{"role": "user", "content": "Answer in exactly one sentence."}],
+        }
+        # A legacy environment variable must no longer be able to add a
+        # router-authored system prompt or alter the model's behavior.
+        with patch.object(config, "AUGMENT_SYSTEM_PROMPT", True, create=True):
+            result = build_openai_request(body, provider="custom")
+
+        self.assertEqual(result["messages"], body["messages"])
+
+    def test_qwen_vision_input_is_not_reduced_to_a_text_placeholder(self):
+        body = {
+            "model": "qwen3-vl-plus",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Describe this image."},
+                {"type": "image", "source": {"type": "url", "url": "https://example.test/image.jpg"}},
+            ]}],
+        }
+        result = build_openai_request(body, provider="qc")
+        content = result["messages"][0]["content"]
+
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertEqual(content[1]["image_url"]["url"], "https://example.test/image.jpg")
+
+    def test_context_compaction_does_not_add_a_router_authored_system_message(self):
+        messages = [
+            {"role": "system", "content": "Use the caller's style."},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "old reply"},
+            {"role": "user", "content": "new"},
+            {"role": "assistant", "content": "new reply"},
+        ]
+        compacted = compact_messages(messages, keep_last=2)
+
+        self.assertEqual(compacted, [
+            {"role": "system", "content": "Use the caller's style."},
+            {"role": "user", "content": "new"},
+            {"role": "assistant", "content": "new reply"},
+        ])
 
     def test_anthropic_conversion_preserves_none_and_strict(self):
         self.assertEqual(openai_tool_choice_to_anthropic("none"), {"type": "none"})

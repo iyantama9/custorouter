@@ -84,6 +84,11 @@ def to_openai_messages(body):
                                 "url": f"data:{source.get('media_type', 'image/jpeg')};base64,{source.get('data', '')}"
                             }
                         })
+                    elif source.get("type") == "url" and source.get("url"):
+                        final_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": source["url"]},
+                        })
                 elif "text" in block and block.get("text"):
                     final_content.append({"type": "text", "text": block["text"]})
             if tool_results:
@@ -102,69 +107,6 @@ def to_openai_messages(body):
     return messages
 
 import app.config as config
-
-_ROUTER_BEHAVIOR = """\
-<router_behavior>
-You are an AI coding assistant. Apply these rules based on context:
-
-THINKING: For complex tasks (multi-step implementation, debugging, architecture, analysis) — reason inside <thinking>…</thinking> before answering. For simple or conversational requests — skip it.
-
-TASK STRUCTURE: When implementing, fixing, or refactoring across multiple steps or files, label each unit of work:
-**Task 1 — [title]**
-[work]
-**Task 2 — [title]**
-[work]
-End with a **Summary** of all changes made.
-
-FORMAT: Always use fenced code blocks with language identifiers. Never truncate code — always complete every function and file. Use clear headers for long responses.
-</router_behavior>
-
-"""
-
-
-def normalize_for_qwen(messages):
-    """Normalize text-model messages for Qwen Cloud compatibility.
-
-    Qwen image models use a different contract and are handled separately in
-    ``build_openai_request``.
-    """
-    normalized = []
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-
-        # Flatten user message arrays to strings
-        if role == "user" and isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "image_url":
-                        img_url = block.get("image_url", {}).get("url", "")
-                        if img_url.startswith("data:"):
-                            text_parts.append("[Image attached - base64 data]")
-                        else:
-                            text_parts.append(f"[Image: {img_url}]")
-            msg["content"] = "\n".join(filter(None, text_parts)) or "[No text content]"
-
-        # Flatten tool message content to strings
-        elif role == "tool" and isinstance(content, list):
-            text_parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
-            msg["content"] = "\n".join(filter(None, text_parts)) or "[Tool result]"
-
-        # Ensure assistant messages with tool_calls have proper content
-        elif role == "assistant":
-            if isinstance(content, list):
-                text_parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
-                msg["content"] = "\n".join(filter(None, text_parts)) or None
-            # If assistant has tool_calls but no content, set to None (OpenAI spec)
-            if "tool_calls" in msg and not msg.get("content"):
-                msg["content"] = None
-
-        normalized.append(msg)
-
-    return normalized
 
 
 def build_openai_request(body, provider="kc", session_history=None):
@@ -218,22 +160,6 @@ def build_openai_request(body, provider="kc", session_history=None):
         if not isinstance(content, list):
             content = [{"type": "text", "text": str(content)}]
         messages = [{"role": "user", "content": content}]
-    elif provider == "qc":
-        messages = normalize_for_qwen(messages)
-
-    # Tools present means an agentic/tool-driven client (Claude Code and
-    # similar) is calling, with its own detailed system prompt describing
-    # exactly how it expects to work. Prepending "structure your answer as
-    # Task 1/Task 2/Summary, use fenced code blocks" on top of that pushes
-    # the model toward narrating in prose instead of calling the tools it
-    # was just given -- the opposite of what an agentic caller wants. Only
-    # add it for plain conversational requests, where it actually helps.
-    if config.AUGMENT_SYSTEM_PROMPT and not is_qwen_image and not body.get("tools"):
-        if messages and messages[0]["role"] == "system":
-            messages[0]["content"] = _ROUTER_BEHAVIOR + messages[0]["content"]
-        else:
-            messages.insert(0, {"role": "system", "content": _ROUTER_BEHAVIOR.strip()})
-
     req = {
         "model": openai_model,
         "messages": messages,
@@ -905,11 +831,6 @@ def compact_messages(messages, keep_last=20):
             break
 
     result = system_msgs[:]
-    if len(kept) < len(conversation):
-        result.append({
-            "role": "system",
-            "content": "[Konteks percakapan sebelumnya telah diringkas otomatis karena melebihi batas token model. Lanjutkan dari konteks terbaru di bawah ini.]"
-        })
     result.extend(kept)
     return result
 
