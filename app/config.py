@@ -161,6 +161,12 @@ current_dahl_key_index = 0
 current_qc_key_index = 0
 current_marketku_key_index = 0
 
+# A persisted maintenance gate used only for planned operations such as a
+# database/server cutover. It lets existing streaming responses finish while
+# preventing new inference requests from creating writes on the old primary.
+MIGRATION_DRAIN_ENABLED = False
+active_inference_requests = 0
+
 # Qwen Cloud per-model key state
 # model_short -> current key index for that model
 qc_model_key_index: dict[str, int] = {}
@@ -201,7 +207,7 @@ def _bg(coro):
 
 
 async def init_state_from_db():
-    global BM_API_KEYS, NR_API_KEYS, DAHL_API_KEYS, QC_API_KEYS, MARKETKU_API_KEYS, key_statuses, total_requests, total_tokens, failover_count, current_bm_key_index, current_nr_key_index, current_dahl_key_index, current_qc_key_index, current_marketku_key_index, START_TIME, CUSTOM_PROVIDERS, CUSTOM_PROVIDER_KEYS, DISABLED_PROVIDERS
+    global BM_API_KEYS, NR_API_KEYS, DAHL_API_KEYS, QC_API_KEYS, MARKETKU_API_KEYS, key_statuses, total_requests, total_tokens, failover_count, current_bm_key_index, current_nr_key_index, current_dahl_key_index, current_qc_key_index, current_marketku_key_index, START_TIME, CUSTOM_PROVIDERS, CUSTOM_PROVIDER_KEYS, DISABLED_PROVIDERS, MIGRATION_DRAIN_ENABLED
 
     BM_API_KEYS.clear()
     NR_API_KEYS.clear()
@@ -227,6 +233,10 @@ async def init_state_from_db():
         }
         CUSTOM_PROVIDER_KEYS[row["prefix"]] = []
     DISABLED_PROVIDERS = await get_disabled_providers()
+    drain_row = await db_fetchrow(
+        "SELECT value FROM server_config WHERE key = 'migration_drain_enabled'"
+    )
+    MIGRATION_DRAIN_ENABLED = bool(drain_row and drain_row["value"] == "true")
 
     # Restore counters once at startup. Dashboard status can then stay on the
     # in-memory fast path instead of aggregating the whole log table per poll.
@@ -390,6 +400,25 @@ async def init_state_from_db():
 
     custom_key_total = sum(len(v) for v in CUSTOM_PROVIDER_KEYS.values())
     print(f"[INIT] Loaded {len(BM_API_KEYS)} bm / {len(NR_API_KEYS)} nry / {len(DAHL_API_KEYS)} dahl / {len(QC_API_KEYS)} qc / {len(MARKETKU_API_KEYS)} marketku / {custom_key_total} custom ({len(CUSTOM_PROVIDERS)} providers) keys, {total_requests} total requests, {failover_count} failovers from DB, {len(DISABLED_PROVIDERS)} disabled providers")
+
+
+def migration_status() -> dict:
+    return {
+        "draining": MIGRATION_DRAIN_ENABLED,
+        "active_inference_requests": active_inference_requests,
+    }
+
+
+async def set_migration_drain(enabled: bool) -> dict:
+    """Persist a cutover gate so a restart cannot accidentally reopen writes."""
+    global MIGRATION_DRAIN_ENABLED
+    MIGRATION_DRAIN_ENABLED = enabled
+    await db_execute(
+        "INSERT INTO server_config (key, value) VALUES ('migration_drain_enabled', $1) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        "true" if enabled else "false",
+    )
+    return migration_status()
 
 
 async def auto_reset_limited_keys():

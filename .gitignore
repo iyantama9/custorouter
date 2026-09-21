@@ -52,6 +52,7 @@ export_*.py
 # Docker volumes
 postgres-data/
 ssl/
+backups/
 
 # Claude Max Bridges (contains server IPs and auth tokens)
 claude-max-bridges/

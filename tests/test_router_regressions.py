@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import httpx
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 from app import database
 from app import config
@@ -29,11 +30,15 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         admin._login_attempts.clear()
         admin._global_login_attempts.clear()
         admin._sessions.clear()
+        config.MIGRATION_DRAIN_ENABLED = False
+        config.active_inference_requests = 0
 
     def tearDown(self):
         admin._login_attempts.clear()
         admin._global_login_attempts.clear()
         admin._sessions.clear()
+        config.MIGRATION_DRAIN_ENABLED = False
+        config.active_inference_requests = 0
 
     async def test_login_issues_revocable_random_session_not_server_secret(self):
         request = self._login_request({"username": config.ADMIN_USERNAME, "password": "test"}, "198.51.100.8")
@@ -104,6 +109,42 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Origin": "https://attacker.example", "X-Forwarded-Host": "attacker.example"},
             )
         self.assertEqual(response.status_code, 403)
+
+    async def test_drain_endpoint_persists_only_boolean_state(self):
+        with (
+            patch.object(config, "set_migration_drain", AsyncMock(return_value={
+                "draining": True, "active_inference_requests": 0,
+            })) as set_drain,
+            patch.object(admin.sse_broadcaster, "broadcast", AsyncMock()),
+            patch.object(admin, "_build_status_dict", AsyncMock(return_value={})),
+        ):
+            response = await admin.set_migration_drain({"enabled": "true"})
+            self.assertEqual(response.status_code, 400)
+            result = await admin.set_migration_drain({"enabled": True})
+
+        self.assertTrue(result["draining"])
+        set_drain.assert_awaited_once_with(True)
+
+    async def test_drain_rejects_new_inference_but_tracks_existing_stream(self):
+        from app.main import security_and_observability_headers
+
+        request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
+        config.MIGRATION_DRAIN_ENABLED = True
+        rejected = await security_and_observability_headers(request, AsyncMock())
+        self.assertEqual(rejected.status_code, 503)
+        self.assertEqual(rejected.headers["retry-after"], "30")
+
+        config.MIGRATION_DRAIN_ENABLED = False
+
+        async def call_next(_request):
+            async def stream():
+                yield b"data: one\n\n"
+            return StreamingResponse(stream(), media_type="text/event-stream")
+
+        streamed = await security_and_observability_headers(request, call_next)
+        self.assertEqual(config.active_inference_requests, 1)
+        _ = [chunk async for chunk in streamed.body_iterator]
+        self.assertEqual(config.active_inference_requests, 0)
 
 
 class HttpClientLifecycleTests(unittest.IsolatedAsyncioTestCase):

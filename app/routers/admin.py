@@ -121,6 +121,7 @@ async def _build_status_dict():
         "total_keys": len(_all_keys),
         "keys": _all_keys,
         "recent_requests": recent_requests,
+        "migration": config_module.migration_status(),
         # Lets the dashboard notice a provider/model catalog change and
         # refetch. This is the copy that matters most: every add/remove
         # provider and add/remove key endpoint broadcasts through here.
@@ -209,6 +210,23 @@ async def api_logout(session_token: str = Cookie(default=None)):
 @router.get("/api/status")
 async def get_status(user: None = Depends(require_auth)):
     return await _build_status_dict()
+
+
+@router.get("/api/operations/drain")
+async def get_migration_drain(user: None = Depends(require_auth)):
+    """Show whether a planned cutover is accepting new inference work."""
+    return config_module.migration_status()
+
+
+@router.put("/api/operations/drain")
+async def set_migration_drain(payload: dict = Body(...), user: None = Depends(require_auth)):
+    """Open/close the migration drain gate; existing streams keep running."""
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        return JSONResponse(status_code=400, content={"error": "enabled must be a boolean"})
+    status = await config_module.set_migration_drain(enabled)
+    await sse_broadcaster.broadcast("status", await _build_status_dict())
+    return status
 
 
 @router.get("/api/logs")

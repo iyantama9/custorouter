@@ -42,6 +42,11 @@ services:
       - ./static:/app/static
       - ./ssl:/app/ssl:ro  # Mount SSL certificates (read-only)
       - ./.env:/app/.env    # so /api/models/refresh writes persist on the host
+    networks:
+      - default
+      # Cloudflared's remotely-managed `nas-tunnel` is in this network.  The
+      # app remains private: the router gets no host-published application port.
+      - nas_tunnel
 
   copilot-api:
     build: ../copilot-api
@@ -57,3 +62,8 @@ volumes:
     driver: local
   copilot_api_data:
     driver: local
+
+networks:
+  nas_tunnel:
+    external: true
+    name: app_default

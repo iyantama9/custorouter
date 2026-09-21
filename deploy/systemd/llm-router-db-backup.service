@@ -1,0 +1,10 @@
+[Unit]
+Description=LLM Router PostgreSQL backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/llm-router
+ExecStart=/opt/llm-router/scripts/backup_router_db.sh

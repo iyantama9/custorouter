@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily LLM Router PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

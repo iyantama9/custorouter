@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.database import init_db, close_db
+import app.config as config_module
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
 from app.sse import sse_broadcaster
 from app.routers import admin, playground, proxy, brain
@@ -43,7 +44,8 @@ async def _build_status_dict():
         "available_keys": available_keys,
         "total_keys": len(_all_keys),
         "keys": _all_keys,
-        "recent_requests": recent_requests
+        "recent_requests": recent_requests,
+        "migration": config_module.migration_status(),
     }
 
 
@@ -81,10 +83,26 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 
+_INFERENCE_REQUEST_PATHS = {
+    "/v1/messages",
+    "/v1/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/v1/messages/count_tokens",
+    "/v1/chat/completions",
+    "/chat/completions",
+}
+
+
+def _is_inference_request(request) -> bool:
+    return request.method == "POST" and request.url.path in _INFERENCE_REQUEST_PATHS
+
+
 @app.middleware("http")
 async def security_and_observability_headers(request, call_next):
     started = time.perf_counter()
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    is_inference = _is_inference_request(request)
+    tracking_inference = False
 
     # Cookie-authenticated admin mutations must originate from this site.
     # Bearer-authenticated proxy APIs are unaffected.
@@ -104,7 +122,34 @@ async def security_and_observability_headers(request, call_next):
             if origin.rstrip("/") not in allowed_origins:
                 return JSONResponse(status_code=403, content={"error": "Invalid request origin."})
 
-    response = await call_next(request)
+    if is_inference and config_module.MIGRATION_DRAIN_ENABLED:
+        response = JSONResponse(
+            status_code=503,
+            content={"error": {"message": "Router is draining for planned migration. Retry shortly.", "type": "service_unavailable"}},
+            headers={"Retry-After": "30"},
+        )
+    else:
+        if is_inference:
+            config_module.active_inference_requests += 1
+            tracking_inference = True
+        try:
+            response = await call_next(request)
+        except Exception:
+            if tracking_inference:
+                config_module.active_inference_requests -= 1
+            raise
+
+    if tracking_inference:
+        body_iterator = response.body_iterator
+
+        async def _tracked_body():
+            try:
+                async for chunk in body_iterator:
+                    yield chunk
+            finally:
+                config_module.active_inference_requests -= 1
+
+        response.body_iterator = _tracked_body()
     response.headers["X-Request-ID"] = request_id
     response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.1f}"
     response.headers["X-Content-Type-Options"] = "nosniff"
