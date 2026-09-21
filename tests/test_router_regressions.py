@@ -8,7 +8,7 @@ from starlette.responses import StreamingResponse
 
 from app import database
 from app import config
-from app.translator import build_openai_request, compact_messages, merge_session_history, stream_as_anthropic, to_anthropic_response
+from app.translator import build_openai_request, compact_messages, stream_as_anthropic, to_anthropic_response
 from app.translator_openai import (
     anthropic_to_openai_response,
     make_anthropic_to_openai_stream_converter,
@@ -186,25 +186,6 @@ class DatabaseHotPathTests(unittest.IsolatedAsyncioTestCase):
         fetchrow.assert_awaited_once()
         self.assertIn("UPDATE router_api_keys", fetchrow.await_args.args[0])
         self.assertIn("RETURNING", fetchrow.await_args.args[0])
-
-    async def test_session_cleanup_parameterizes_retention_days(self):
-        with patch.object(database, "execute", AsyncMock()) as execute:
-            await database.cleanup_old_sessions(14)
-
-        query, days = execute.await_args.args
-        self.assertIn("make_interval(days => $1)", query)
-        self.assertEqual(days, 14)
-
-    async def test_session_upsert_is_atomic_and_single_round_trip(self):
-        with patch.object(database, "fetchrow", AsyncMock(return_value={"id": 42})) as fetchrow:
-            session_id = await database.get_or_create_session("project", "hash", "model")
-
-        self.assertEqual(session_id, 42)
-        fetchrow.assert_awaited_once()
-        query = fetchrow.await_args.args[0]
-        self.assertIn("ON CONFLICT", query)
-        self.assertIn("RETURNING id", query)
-
 
 class SSEBackpressureTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_client_queue_is_bounded_and_keeps_newest_event(self):
@@ -460,19 +441,6 @@ class ProviderTransparencyTests(unittest.TestCase):
             {"role": "user", "content": "new"},
             {"role": "assistant", "content": "new reply"},
         ])
-
-    def test_memory_does_not_duplicate_a_client_supplied_transcript(self):
-        history = [
-            {"role": "user", "content": "What is the status?"},
-            {"role": "assistant", "content": "All services are healthy."},
-        ]
-        current = [
-            {"role": "system", "content": "Be concise."},
-            *history,
-            {"role": "user", "content": "What changed since then?"},
-        ]
-
-        self.assertEqual(merge_session_history(current, history), current)
 
     def test_anthropic_conversion_preserves_none_and_strict(self):
         self.assertEqual(openai_tool_choice_to_anthropic("none"), {"type": "none"})

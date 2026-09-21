@@ -35,15 +35,6 @@ The application derives its dashboard session secret from configured admin value
 
 A threshold of zero disables the corresponding timing behavior where implemented. Tune against observed time-to-first-token and completion latency. Aggressive rotation can increase cost and upstream pressure.
 
-## Conversation memory
-
-| Setting | Purpose |
-| --- | --- |
-| `CONVERSATION_MEMORY_ENABLED` | Enable compatible conversation memory behavior |
-| `MAX_HISTORY_MESSAGES` | Bound reconstructed history |
-| `MEMORY_RETENTION_DAYS` | Define application memory retention |
-
-
 ## Upstream configuration
 
 Built-in upstream families read base URLs, credential lists, and inventory identifiers from environment variables. Custom upstreams are configured in PostgreSQL through the dashboard. Documentation intentionally does not enumerate upstream names or model identifiers because live inventory changes.

@@ -209,30 +209,13 @@ async def setup_tables():
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
-    # ── Conversation Memory Extensions ──
-    await execute("""
-        ALTER TABLE chat_sessions
-        ADD COLUMN IF NOT EXISTS project_identifier VARCHAR(255),
-        ADD COLUMN IF NOT EXISTS api_key_hash VARCHAR(64),
-        ADD COLUMN IF NOT EXISTS last_model VARCHAR(100)
-    """)
-    await execute("""
-        CREATE INDEX IF NOT EXISTS idx_sessions_identifier
-        ON chat_sessions(project_identifier)
-    """)
-    await execute("""
-        CREATE INDEX IF NOT EXISTS idx_sessions_api_key
-        ON chat_sessions(api_key_hash)
-    """)
-    # Distinguish real router traffic (auto-created by get_or_create_session,
-    # always carries a project_identifier) from sessions the admin actually
-    # started in the Playground UI, so the two never share one list again.
+    # Keep Playground sessions separate from any historical API-session rows.
     await execute("""
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS source VARCHAR(20)
     """)
     await execute("""
         UPDATE chat_sessions
-        SET source = CASE WHEN project_identifier IS NULL THEN 'playground' ELSE 'api' END
+        SET source = COALESCE(source, 'playground')
         WHERE source IS NULL
     """)
     await execute("""
@@ -242,33 +225,14 @@ async def setup_tables():
         CREATE INDEX IF NOT EXISTS idx_sessions_source
         ON chat_sessions(source)
     """)
-
-    # Older get-then-insert session creation could race under concurrent first
-    # messages. Merge any duplicates before enforcing the invariant in SQL.
     await execute("""
-        DO $$
-        DECLARE duplicate RECORD;
-        BEGIN
-            FOR duplicate IN
-                SELECT id, MIN(id) OVER (
-                    PARTITION BY project_identifier, api_key_hash
-                ) AS keeper_id
-                FROM chat_sessions
-                WHERE project_identifier IS NOT NULL
-            LOOP
-                IF duplicate.id <> duplicate.keeper_id THEN
-                    UPDATE chat_messages SET session_id = duplicate.keeper_id
-                    WHERE session_id = duplicate.id;
-                    DELETE FROM chat_sessions WHERE id = duplicate.id;
-                END IF;
-            END LOOP;
-        END $$
+        ALTER TABLE chat_sessions
+        DROP COLUMN IF EXISTS project_identifier,
+        DROP COLUMN IF EXISTS api_key_hash,
+        DROP COLUMN IF EXISTS last_model
     """)
-    await execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_unique_identifier
-        ON chat_sessions(project_identifier, api_key_hash)
-        WHERE project_identifier IS NOT NULL
-    """)
+    await execute("DROP INDEX IF EXISTS idx_sessions_identifier")
+    await execute("DROP INDEX IF EXISTS idx_sessions_api_key")
 
     # ── Router API Keys ──
     await execute("""
@@ -337,10 +301,7 @@ async def setup_tables():
     """)
 
 
-# ── Chat Session Helpers ──
-# These back the Playground UI only. Real router traffic sessions (created by
-# get_or_create_session for /v1/messages continuity) share the same table but
-# are tagged source='api' and deliberately excluded here.
+# ── Playground Session Helpers ──
 async def get_chat_sessions():
     return await fetch("SELECT * FROM chat_sessions WHERE source = 'playground' ORDER BY updated_at DESC")
 
@@ -372,49 +333,6 @@ async def get_chat_messages(session_id: int):
 async def save_chat_message(session_id: int, role: str, content: str):
     await execute("UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1", session_id)
     return await fetchrow("INSERT INTO chat_messages (session_id, role, content) VALUES ($1, $2, $3) RETURNING *", session_id, role, content)
-
-# ── Conversation Memory Helpers ──
-async def get_or_create_session(identifier: str, api_key_hash: str, model: str = None):
-    """Atomically get or create a stable API session in one round-trip."""
-    name = f"Session {identifier[:8]}"
-    session = await fetchrow(
-        """INSERT INTO chat_sessions
-               (name, project_identifier, api_key_hash, last_model)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (project_identifier, api_key_hash)
-               WHERE project_identifier IS NOT NULL
-           DO UPDATE SET
-               updated_at = NOW(),
-               last_model = COALESCE(EXCLUDED.last_model, chat_sessions.last_model)
-           RETURNING id""",
-        name, identifier, api_key_hash, model
-    )
-    return session["id"]
-
-async def load_session_history(session_id: int, limit: int = 20):
-    """Load N most recent messages from a session in chronological order."""
-    messages = await fetch(
-        "SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY id DESC LIMIT $2",
-        session_id, limit
-    )
-    # Reverse to get chronological order (oldest first)
-    return list(reversed(messages))
-
-async def append_to_session(session_id: int, role: str, content: str):
-    """Append a message to session history and return its database row."""
-    await execute("UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1", session_id)
-    return await fetchrow(
-        "INSERT INTO chat_messages (session_id, role, content) VALUES ($1, $2, $3) RETURNING *",
-        session_id, role, content
-    )
-
-async def cleanup_old_sessions(retention_days: int = 30):
-    """Delete sessions older than retention_days."""
-    retention_days = max(1, int(retention_days))
-    await execute(
-        "DELETE FROM chat_sessions WHERE updated_at < NOW() - make_interval(days => $1)",
-        retention_days,
-    )
 
 # ── Router API Key Helpers ──
 async def create_router_api_key(key_name: str, expires_at=None, token_quota: int = 0, allowed_models: str = "", model_prompts: str = "{}", model_aliases: str = "{}"):

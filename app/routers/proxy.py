@@ -1,6 +1,5 @@
 import json
 import hmac
-import hashlib
 import logging
 import os
 import time
@@ -349,37 +348,6 @@ async def _bill_router_key(request: Request, tokens: int):
         print(f"[ROUTER-KEY] Failed to record token usage: {e}", flush=True)
 
 
-def _memory_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and isinstance(block.get("text"), str)
-        )
-    return ""
-
-
-async def _save_memory_exchange(
-    session_id: int,
-    user_content: str,
-    assistant_content,
-):
-    """Persist an opt-in session history."""
-    from app.database import append_to_session
-
-    await append_to_session(session_id, "user", user_content)
-
-    if not assistant_content:
-        return
-
-    stored_assistant = (
-        assistant_content
-        if isinstance(assistant_content, str)
-        else json.dumps(assistant_content)
-    )
-    await append_to_session(session_id, "assistant", stored_assistant)
 
 
 async def _broadcast_request_log():
@@ -879,42 +847,7 @@ async def messages(request: Request):
             await _broadcast_request_log()
             return JSONResponse(status_code=status, content=body)
 
-    # Conversation history is opt-in and never changes model instructions.
-    enable_memory = request.headers.get("X-Enable-Memory", "false").lower() == "true"
-    session_id_header = request.headers.get("X-Session-Id")
-    user_message_text = ""
-    if enable_memory:
-        messages = payload.get("messages", [])
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_message_text = _memory_text(msg.get("content", ""))
-                break
 
-    provider = "bm"
-    if payload.get("model"):
-        if payload["model"].startswith("bm/") or payload["model"] in config_module.BLUESMINDS_MODELS:
-            provider = "bm"
-        elif payload["model"].startswith("nry/") or payload["model"] in config_module.NARA_MODELS:
-            provider = "nry"
-        elif payload["model"].startswith("dh/") or payload["model"] in config_module.DAHL_MODELS_SHORT:
-            provider = "dahl"
-        elif payload["model"].startswith("qc/"):
-            provider = "qc"
-        elif payload["model"].startswith("mk/") or payload["model"] in config_module.MARKETKU_MODELS:
-            provider = "marketku"
-
-    if provider in config_module.DISABLED_PROVIDERS:
-        return JSONResponse(status_code=503, content={"error": {"message": f"Provider '{provider}' has been removed."}})
-
-    for prefix in ("bm/", "nry/", "dh/", "qc/", "mk/"):
-        if payload.get("model", "").startswith(prefix):
-            payload["model"] = payload["model"][len(prefix):]
-            break
-
-    if provider == "dahl":
-        payload["model"] = resolve_dahl_model(payload["model"])
-
-    current_key = ""
     if provider == "bm":
         current_key = get_current_bm_key() if BM_API_KEYS else BLUESMINDS_API_KEY or ""
     elif provider == "nry":
@@ -926,45 +859,6 @@ async def messages(request: Request):
     elif provider == "marketku":
         current_key = get_current_marketku_key() if MARKETKU_API_KEYS else ""
 
-    session_id = None
-    if enable_memory:
-        auth_header = request.headers.get("Authorization", "")
-        x_api_key = request.headers.get("x-api-key", "")
-        client_credential = auth_header[7:] if auth_header.startswith("Bearer ") else x_api_key
-        api_key_hash_for_memory = hashlib.sha256(client_credential.encode()).hexdigest()
-        if not session_id_header:
-            first_user = next((m for m in payload.get("messages", []) if m.get("role") == "user"), None)
-            normalized_first_text = " ".join(_memory_text(first_user.get("content", "") if first_user else "").split())
-            session_id_header = hashlib.sha256(
-                f"{api_key_hash_for_memory}:{normalized_first_text}".encode()
-            ).hexdigest()[:16]
-        from app.database import get_or_create_session
-        session_id = await get_or_create_session(
-            identifier=session_id_header,
-            api_key_hash=api_key_hash_for_memory,
-            model=payload.get("model")
-        )
-
-    session_history = None
-    if enable_memory:
-        from app.database import load_session_history
-        history_rows = await load_session_history(session_id, limit=config_module.MAX_HISTORY_MESSAGES)
-        if history_rows:
-            session_history = []
-            for row in history_rows:
-                content_str = row["content"]
-                try:
-                    content = json.loads(content_str)
-                    if isinstance(content, list):
-                        text_parts = [
-                            block.get("text", "")
-                            for block in content
-                            if isinstance(block, dict) and block.get("type") == "text"
-                        ]
-                        content_str = "\n".join(text_parts) if text_parts else content_str
-                except Exception:
-                    pass
-                session_history.append({"role": row["role"], "content": content_str})
 
     if provider == "bm":
         upstream_base_url = BLUESMINDS_BASE_URL
@@ -990,7 +884,7 @@ async def messages(request: Request):
     display_log_model = display_model if display_model != requested_model_raw else log_model
 
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
-    upstream_req = build_openai_request(payload, provider=provider, session_history=session_history)
+    upstream_req = build_openai_request(payload, provider=provider)
     upstream_endpoint = f"{upstream_base_url}/chat/completions"
 
     input_tokens = estimate_tokens(payload)
@@ -1084,13 +978,8 @@ async def messages(request: Request):
         async def generate():
             nonlocal requested_qc_model
             nonlocal log_model
-            nonlocal session_id
-            nonlocal enable_memory
             last_error_status = 429
             last_error_content = {"error": {"message": "All configured API keys are rate limited or unauthorized."}}
-
-            # Conversation Memory: Accumulator for streaming response
-            accumulated_response = []
 
             for c_idx, compact_level in enumerate(compact_levels):
                 if compact_level is not None:
@@ -1195,63 +1084,11 @@ async def messages(request: Request):
                                     has_yielded = True
                                     if first_token_time is None:
                                         first_token_time = time.time()
-
-                                    if enable_memory and session_id:
-                                        try:
-                                            # Parse SSE chunk to extract content
-                                            if chunk.startswith("event: content_block_start\ndata: "):
-                                                data_json = chunk.split("\ndata: ", 1)[1].strip()
-                                                data = json.loads(data_json)
-                                                if data.get("type") == "content_block_start":
-                                                    content_block = data.get("content_block", {})
-                                                    idx = data.get("index", len(accumulated_response))
-                                                    # Ensure list is large enough
-                                                    while len(accumulated_response) <= idx:
-                                                        accumulated_response.append(None)
-                                                    accumulated_response[idx] = content_block.copy()
-                                            elif chunk.startswith("event: content_block_delta\ndata: "):
-                                                data_json = chunk.split("\ndata: ", 1)[1].strip()
-                                                data = json.loads(data_json)
-                                                if data.get("type") == "content_block_delta":
-                                                    idx = data.get("index", 0)
-                                                    delta = data.get("delta", {})
-                                                    # Ensure block exists
-                                                    while len(accumulated_response) <= idx:
-                                                        accumulated_response.append(None)
-                                                    if accumulated_response[idx] is None:
-                                                        accumulated_response[idx] = {}
-
-                                                    # Append delta content
-                                                    if delta.get("type") == "text_delta":
-                                                        text = delta.get("text", "")
-                                                        if "text" not in accumulated_response[idx]:
-                                                            accumulated_response[idx]["type"] = "text"
-                                                            accumulated_response[idx]["text"] = ""
-                                                        accumulated_response[idx]["text"] += text
-                                                    elif delta.get("type") == "thinking_delta":
-                                                        thinking = delta.get("thinking", "")
-                                                        if "thinking" not in accumulated_response[idx]:
-                                                            accumulated_response[idx]["type"] = "thinking"
-                                                            accumulated_response[idx]["thinking"] = ""
-                                                        accumulated_response[idx]["thinking"] += thinking
-                                        except Exception:
-                                            pass  # Ignore parsing errors
-
                                     yield chunk
                                 total_ms = int((time.time() - start_req_time) * 1000)
                                 ttft_ms = int((first_token_time - start_req_time) * 1000) if first_token_time else total_ms
                                 add_request_log(log_model, 200, current_key, rotated_occurred, total_ms, input_tokens, token_tracker["output_tokens"])
                                 await _bill_router_key(request, input_tokens + token_tracker["output_tokens"])
-
-                                final_response = [
-                                    block for block in accumulated_response if block is not None
-                                ]
-                                if enable_memory and user_message_text:
-                                    await _save_memory_exchange(
-                                        session_id=session_id,
-                                        user_content=user_message_text,
-                                        assistant_content=final_response,
-                                    )
 
                                 threshold = config_module.SLOW_RESPONSE_THRESHOLD_MS
                                 if threshold > 0 and ttft_ms > threshold and len(api_keys_to_use) > 1:
@@ -1416,13 +1253,6 @@ async def messages(request: Request):
                 total_ms = int((time.time() - start_req_time) * 1000)
                 add_request_log(log_model, 200, current_key, rotated_occurred, total_ms, input_tokens, output_tokens, cached_tokens)
                 await _bill_router_key(request, input_tokens + output_tokens)
-
-                if enable_memory and user_message_text:
-                    await _save_memory_exchange(
-                        session_id=session_id,
-                        user_content=user_message_text,
-                        assistant_content=anthropic_resp.get("content", []),
-                    )
 
                 threshold = config_module.SLOW_RESPONSE_THRESHOLD_MS
                 if threshold > 0 and total_ms > threshold and len(api_keys_to_use) > 1:

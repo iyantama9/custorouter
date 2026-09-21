@@ -113,11 +113,6 @@ SHOW_REASONING = os.getenv("SHOW_REASONING", "true").lower() == "true"
 SLOW_RESPONSE_THRESHOLD_MS = int(os.getenv("SLOW_RESPONSE_THRESHOLD_MS", "10000"))
 # Minutes before a "Limited" key is automatically reset to "Standby". 0 = disabled.
 LIMIT_COOLDOWN_MINUTES = int(os.getenv("LIMIT_COOLDOWN_MINUTES", "60"))
-# Conversation Memory Configuration
-CONVERSATION_MEMORY_ENABLED = os.getenv("CONVERSATION_MEMORY_ENABLED", "true").lower() == "true"
-MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
-MEMORY_RETENTION_DAYS = int(os.getenv("MEMORY_RETENTION_DAYS", "30"))
-
 if not PORT_STR:
     raise ValueError("PORT environment variable is not set")
 
