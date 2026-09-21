@@ -9,6 +9,38 @@ def flatten_content(content):
     parts = [p.get("text", "") if isinstance(p, dict) else p for p in content if isinstance(p, (dict, str))]
     return "\n".join(filter(None, parts))
 
+
+def _message_signature(message):
+    """Return a stable value for comparing persisted and client history."""
+    return (
+        message.get("role"),
+        json.dumps(message.get("content"), sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
+def merge_session_history(messages, session_history):
+    """Prepend only history that the client did not already send.
+
+    Clients commonly keep their own full transcript and enable router memory
+    as a resilience feature. Sending the overlapping transcript twice wastes
+    context and can make the model overweight old instructions. Remove the
+    largest exact overlap between the saved-history tail and current request.
+    """
+    system_messages = [message for message in messages if message.get("role") == "system"]
+    conversation = [message for message in messages if message.get("role") != "system"]
+    history = list(session_history or [])
+
+    max_overlap = min(len(history), len(conversation))
+    for size in range(max_overlap, 0, -1):
+        if (
+            [_message_signature(message) for message in history[-size:]]
+            == [_message_signature(message) for message in conversation[:size]]
+        ):
+            history = history[:-size]
+            break
+
+    return system_messages + history + conversation
+
 def convert_tools(anthropic_tools):
     if not anthropic_tools:
         return []
@@ -142,12 +174,7 @@ def build_openai_request(body, provider="kc", session_history=None):
 
     # Inject session history if provided
     if session_history:
-        # Separate system messages from conversation
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        conversation = [m for m in messages if m.get("role") != "system"]
-
-        # Build: system + history + current conversation
-        messages = system_msgs + session_history + conversation
+        messages = merge_session_history(messages, session_history)
 
     is_qwen_image = provider == "qc" and "image" in openai_model.lower()
 
