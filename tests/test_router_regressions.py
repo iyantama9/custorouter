@@ -9,7 +9,13 @@ from starlette.responses import StreamingResponse
 from app import database
 from app import config
 from app.translator import build_openai_request, stream_as_anthropic, to_anthropic_response
-from app.translator_openai import openai_tool_choice_to_anthropic, openai_tools_to_anthropic
+from app.translator_openai import (
+    anthropic_to_openai_response,
+    make_anthropic_to_openai_stream_converter,
+    openai_to_anthropic_messages,
+    openai_tool_choice_to_anthropic,
+    openai_tools_to_anthropic,
+)
 from app.routers import admin, brain, proxy
 from app.sse import SSEBroadcaster
 
@@ -406,6 +412,19 @@ class ProviderTransparencyTests(unittest.TestCase):
         self.assertEqual(result["tool_choice"], "none")
         self.assertTrue(result["tools"][0]["function"]["strict"])
 
+    def test_anthropic_parallel_tool_constraint_reaches_openai(self):
+        body = {
+            "model": "example",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "tool", "name": "lookup", "disable_parallel_tool_use": True},
+        }
+        with patch.object(config, "AUGMENT_SYSTEM_PROMPT", False):
+            result = build_openai_request(body, provider="custom")
+
+        self.assertEqual(result["tool_choice"], {"type": "function", "function": {"name": "lookup"}})
+        self.assertFalse(result["parallel_tool_calls"])
+
     def test_anthropic_conversion_preserves_none_and_strict(self):
         self.assertEqual(openai_tool_choice_to_anthropic("none"), {"type": "none"})
         tools = openai_tools_to_anthropic([{
@@ -413,6 +432,44 @@ class ProviderTransparencyTests(unittest.TestCase):
             "function": {"name": "lookup", "parameters": {"type": "object"}, "strict": True},
         }])
         self.assertTrue(tools[0]["strict"])
+
+    def test_openai_parallel_tool_results_become_one_anthropic_turn(self):
+        _, messages = openai_to_anthropic_messages([
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_weather", "type": "function", "function": {"name": "weather", "arguments": "{}"}},
+                {"id": "call_time", "type": "function", "function": {"name": "time", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "call_weather", "content": "Sunny"},
+            {"role": "tool", "tool_call_id": "call_time", "content": "10:00"},
+        ])
+
+        self.assertEqual([message["role"] for message in messages], ["assistant", "user"])
+        self.assertEqual([block["tool_use_id"] for block in messages[1]["content"]], ["call_weather", "call_time"])
+
+    def test_anthropic_tool_response_and_stream_are_exposed_as_openai_calls(self):
+        response = anthropic_to_openai_response({
+            "content": [{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "x"}}],
+            "stop_reason": "tool_use",
+        }, "test/model")
+        choice = response["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual(choice["message"]["tool_calls"][0]["function"]["arguments"], '{"q": "x"}')
+
+        convert = make_anthropic_to_openai_stream_converter("test/model")
+        start = json.loads(convert({
+            "type": "content_block_start", "index": 2,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "lookup"},
+        }).split("data: ", 1)[1])
+        args = json.loads(convert({
+            "type": "content_block_delta", "index": 2,
+            "delta": {"type": "input_json_delta", "partial_json": '{"q":"x"}'},
+        }).split("data: ", 1)[1])
+        finish = json.loads(convert({
+            "type": "message_delta", "delta": {"stop_reason": "tool_use"},
+        }).split("data: ", 1)[1])
+        self.assertEqual(start["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "lookup")
+        self.assertEqual(args["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], '{"q":"x"}')
+        self.assertEqual(finish["choices"][0]["finish_reason"], "tool_calls")
 
     def test_token_limit_is_reported_to_anthropic_clients(self):
         upstream = {

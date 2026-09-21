@@ -14,12 +14,27 @@ def openai_to_anthropic_messages(openai_messages: List[Dict]) -> tuple[Optional[
     """
     system_prompt = None
     anthropic_messages = []
+    pending_tool_results = []
+
+    def flush_tool_results():
+        """Emit adjacent OpenAI tool messages as one Anthropic user turn.
+
+        OpenAI represents results for parallel calls as consecutive `tool`
+        messages. Anthropic requires those results to be content blocks of
+        one `user` message; emitting two user messages in a row causes a
+        protocol error on the next agent turn.
+        """
+        nonlocal pending_tool_results
+        if pending_tool_results:
+            anthropic_messages.append({"role": "user", "content": pending_tool_results})
+            pending_tool_results = []
 
     for msg in openai_messages:
         role = msg.get("role")
         content = msg.get("content", "")
 
         if role == "system":
+            flush_tool_results()
             # Anthropic uses separate system parameter
             if isinstance(content, str):
                 system_prompt = content
@@ -31,6 +46,7 @@ def openai_to_anthropic_messages(openai_messages: List[Dict]) -> tuple[Optional[
             continue
 
         if role == "assistant":
+            flush_tool_results()
             # Handle tool calls
             tool_calls = msg.get("tool_calls")
             if tool_calls:
@@ -41,11 +57,19 @@ def openai_to_anthropic_messages(openai_messages: List[Dict]) -> tuple[Optional[
                 # Add tool use blocks
                 for tc in tool_calls:
                     func = tc.get("function", {})
+                    arguments = func.get("arguments", "{}")
+                    try:
+                        tool_input = json.loads(arguments) if isinstance(arguments, str) else arguments
+                    except (TypeError, json.JSONDecodeError):
+                        # Invalid historical calls must not turn a proxy
+                        # request into an internal error. The upstream will
+                        # still receive a structurally valid tool-use block.
+                        tool_input = {}
                     content_blocks.append({
                         "type": "tool_use",
                         "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                         "name": func.get("name", ""),
-                        "input": json.loads(func.get("arguments", "{}"))
+                        "input": tool_input if isinstance(tool_input, dict) else {},
                     })
                 anthropic_messages.append({
                     "role": "assistant",
@@ -59,17 +83,16 @@ def openai_to_anthropic_messages(openai_messages: List[Dict]) -> tuple[Optional[
                 })
 
         elif role == "tool":
-            # Convert tool result to Anthropic format
-            anthropic_messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id", ""),
-                    "content": content
-                }]
+            # Keep adjacent results together: one Anthropic user turn may
+            # contain many tool_result blocks after a parallel tool call.
+            pending_tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": msg.get("tool_call_id", ""),
+                "content": content,
             })
 
         elif role == "user":
+            flush_tool_results()
             # Handle user messages with possible images
             if isinstance(content, str):
                 anthropic_messages.append({
@@ -105,6 +128,8 @@ def openai_to_anthropic_messages(openai_messages: List[Dict]) -> tuple[Optional[
                     "role": "user",
                     "content": content_blocks if content_blocks else ""
                 })
+
+    flush_tool_results()
 
     return system_prompt, anthropic_messages
 

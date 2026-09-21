@@ -263,6 +263,13 @@ def build_openai_request(body, provider="kc", session_history=None):
         elif tc.get("type") == "tool":
             req["tool_choice"] = {"type": "function", "function": {"name": tc["name"]}}
 
+        # Anthropic expresses this constraint inside tool_choice, while
+        # OpenAI-compatible upstreams use a top-level flag.  Losing it does
+        # not prevent tool use, but it can make an agent unexpectedly issue
+        # several side-effecting calls at once.
+        if tc.get("disable_parallel_tool_use") is True:
+            req["parallel_tool_calls"] = False
+
     return req
 
 def to_anthropic_response(openai_resp, model, msg_id):
