@@ -9,7 +9,6 @@ Use this order to avoid confusing one failure layer with another:
 3. Validate client authentication and policy with the inventory endpoint.
 4. Test route resolution with one known enabled identifier.
 5. Test one upstream credential with a bounded request.
-6. Inspect translation, streaming, usage, and Brain only after dispatch works.
 
 ## Inventory is empty
 
@@ -19,7 +18,6 @@ Check client expiry, quota, allowlist, disabled routes, custom upstream configur
 
 Confirm the header format and that the value belongs to the intended trust domain. A dashboard login, managed router key, legacy router password, and upstream credential are different secrets.
 
-For Brain routes, remember that current direct-route validation uses the configured router password boundary rather than full managed-key policy.
 
 ## All requests fail before dispatch
 
@@ -49,9 +47,7 @@ Compare provider-reported usage, normalized usage, request logs, and the managed
 
 Check admin session validity, `/api/sse`, reverse-proxy buffering, connection timeout, and browser network errors. Historical API requests can still work while the SSE channel is blocked.
 
-## Brain search is empty or unhealthy
 
-Confirm direct Brain authentication, key-derived scope, database records, embedding initialization, session identifiers, and similarity threshold. A healthy middleware counter endpoint is not an active PostgreSQL or embedding probe.
 
 ## Compose cannot build
 

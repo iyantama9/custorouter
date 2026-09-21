@@ -16,7 +16,7 @@ from app.translator_openai import (
     openai_tool_choice_to_anthropic,
     openai_tools_to_anthropic,
 )
-from app.routers import admin, brain, proxy
+from app.routers import admin, proxy
 from app.sse import SSEBroadcaster
 
 
@@ -76,11 +76,6 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
               patch.object(admin, "_TRUSTED_PROXY_IPS", {"172.18.0.1"})):
             self.assertEqual(admin._client_ip(trusted), "198.51.100.42")
             self.assertEqual(admin._client_ip(untrusted), "172.18.0.2")
-
-    async def test_brain_rejects_missing_credentials(self):
-        request = Request({"type": "http", "method": "GET", "path": "/brain/profile", "headers": []})
-        response = await brain.get_profile(request)
-        self.assertEqual(response.status_code, 401)
 
     async def test_login_rejects_oversized_body_before_json_parsing(self):
         from app.main import app
@@ -876,45 +871,6 @@ class CustomProviderForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["tool_choice"], {"type": "none"})
         self.assertTrue(sent["tools"][0]["strict"])
 
-    async def test_builtin_openai_does_not_inject_brain_by_default(self):
-        sent = []
-
-        def handle(request):
-            sent.append(json.loads(request.content))
-            return httpx.Response(200, json={
-                "model": "example", "choices": [{"message": {"content": "OK"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-            })
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        body = {"model": "bm/example", "messages": [{"role": "user", "content": "Hi"}]}
-        request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
-        try:
-            with (
-                patch.object(proxy, "_check_router_auth", AsyncMock(return_value=True)),
-                patch.object(proxy, "_read_json_payload", AsyncMock(return_value=(body, None))),
-                patch.object(proxy, "_model_allowed_for_key", return_value=None),
-                patch.object(proxy, "_key_model_prompt", return_value=""),
-                patch.object(proxy, "BM_API_KEYS", ["secret"]),
-                patch.object(proxy, "get_current_bm_key", return_value="secret"),
-                patch.object(proxy, "_upstream_client", client),
-                patch.object(proxy, "add_request_log"),
-                patch.object(proxy, "_bill_router_key", AsyncMock()),
-                patch.object(proxy.sse_broadcaster, "broadcast", AsyncMock()),
-                patch.object(proxy, "_build_status_dict", AsyncMock(return_value={})),
-                patch.object(database, "get_or_create_session", AsyncMock()) as session,
-                patch.object(proxy.BrainMiddleware, "build_brain_context", AsyncMock()) as brain,
-            ):
-                response = await proxy.chat_completions(request)
-        finally:
-            await client.aclose()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(sent[0]["messages"], body["messages"])
-        session.assert_not_awaited()
-        brain.assert_not_awaited()
-
-
 class MobileDashboardPerformanceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -940,7 +896,7 @@ class MobileDashboardPerformanceTests(unittest.TestCase):
         self.assertNotIn('<script defer src="https://cdn.jsdelivr.net/npm/marked', self.dashboard)
 
     def test_inactive_tabs_are_not_hydrated_on_initial_load(self):
-        for tab in ("keys", "playground", "brain", "models", "routing"):
+        for tab in ("keys", "playground", "models", "routing"):
             self.assertIn(f'<template x-if="activeTab === \'{tab}\'">', self.dashboard)
             self.assertNotIn(f'<div x-show="activeTab === \'{tab}\'"', self.dashboard)
 

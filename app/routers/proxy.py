@@ -1,5 +1,6 @@
 import json
 import hmac
+import hashlib
 import logging
 import os
 import time
@@ -31,8 +32,6 @@ from app.sse import sse_broadcaster
 
 
 logger = logging.getLogger(__name__)
-from app.brain.middleware import BrainMiddleware
-from app.brain.memory import MemoryManager
 from app.database import verify_router_api_key, add_router_key_token_usage
 
 
@@ -350,25 +349,27 @@ async def _bill_router_key(request: Request, tokens: int):
         print(f"[ROUTER-KEY] Failed to record token usage: {e}", flush=True)
 
 
-async def _save_brain_exchange(
+def _memory_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return ""
+
+
+async def _save_memory_exchange(
     session_id: int,
-    api_key_hash: str,
     user_content: str,
     assistant_content,
-    model: str,
 ):
-    """Persist a completed exchange and index both messages in the brain."""
+    """Persist an opt-in session history."""
     from app.database import append_to_session
 
-    user_row = await append_to_session(session_id, "user", user_content)
-    await BrainMiddleware.save_conversation_to_brain(
-        session_id=session_id,
-        api_key_hash=api_key_hash,
-        message_id=user_row["id"],
-        role="user",
-        content=user_content,
-        model=model,
-    )
+    await append_to_session(session_id, "user", user_content)
 
     if not assistant_content:
         return
@@ -378,21 +379,7 @@ async def _save_brain_exchange(
         if isinstance(assistant_content, str)
         else json.dumps(assistant_content)
     )
-    assistant_text = MemoryManager._extract_text_from_content(stored_assistant)
-    if not assistant_text.strip():
-        return
-
-    assistant_row = await append_to_session(
-        session_id, "assistant", stored_assistant
-    )
-    await BrainMiddleware.save_conversation_to_brain(
-        session_id=session_id,
-        api_key_hash=api_key_hash,
-        message_id=assistant_row["id"],
-        role="assistant",
-        content=assistant_text,
-        model=model,
-    )
+    await append_to_session(session_id, "assistant", stored_assistant)
 
 
 async def _broadcast_request_log():
@@ -819,7 +806,7 @@ async def messages(request: Request):
         return JSONResponse(status_code=400, content={"error": {"message": "messages must be an array."}})
 
     # Custom (admin-added) providers get a self-contained dispatch path,
-    # short-circuiting before any of the built-in routing/brain logic below.
+    # short-circuiting before built-in provider routing below.
     # An aliased name has to become the real model before anything routes on
     # it; display_model is what the response will claim to be.
     requested_model_raw, display_model = _resolve_alias(request, payload.get("model", "") or "")
@@ -892,31 +879,15 @@ async def messages(request: Request):
             await _broadcast_request_log()
             return JSONResponse(status_code=status, content=body)
 
-    # Memory-based prompt augmentation is opt-in; ordinary proxy requests
-    # must not silently change the model's instructions or add DB latency.
-    enable_brain = request.headers.get("X-Enable-Brain", "false").lower() == "true"
-
-    # Conversation Memory: Extract session headers
+    # Conversation history is opt-in and never changes model instructions.
     enable_memory = request.headers.get("X-Enable-Memory", "false").lower() == "true"
     session_id_header = request.headers.get("X-Session-Id")
-
-    # Brain: Extract user message for context building
     user_message_text = ""
-    last_user_msg = None
-    if enable_brain:
+    if enable_memory:
         messages = payload.get("messages", [])
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                last_user_msg = msg
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    user_message_text = content
-                elif isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                    user_message_text = "\n".join(text_parts)
+                user_message_text = _memory_text(msg.get("content", ""))
                 break
 
     provider = "bm"
@@ -943,7 +914,6 @@ async def messages(request: Request):
     if provider == "dahl":
         payload["model"] = resolve_dahl_model(payload["model"])
 
-    # Determine current API key for both memory and brain
     current_key = ""
     if provider == "bm":
         current_key = get_current_bm_key() if BM_API_KEYS else BLUESMINDS_API_KEY or ""
@@ -956,33 +926,22 @@ async def messages(request: Request):
     elif provider == "marketku":
         current_key = get_current_marketku_key() if MARKETKU_API_KEYS else ""
 
-    # Brain sessions are automatic. Explicit session IDs let clients preserve
-    # continuity; otherwise the stable first user message identifies a thread.
-    auth_header = request.headers.get("Authorization", "")
-    x_api_key = request.headers.get("x-api-key", "")
-    client_credential = auth_header[7:] if auth_header.startswith("Bearer ") else x_api_key
-    api_key_hash_for_brain = BrainMiddleware.get_api_key_hash(client_credential)
-
-    if not session_id_header:
-        first_user = next((m for m in payload.get("messages", []) if m.get("role") == "user"), None)
-        first_user_text = MemoryManager._extract_text_from_content(
-            json.dumps(first_user.get("content", "")) if first_user else ""
-        )
-        # Normalize whitespace so trivial formatting differences (trailing
-        # newline, double spaces) don't fragment the same thread into two
-        # "sessions". Clients that want real continuity should still send
-        # X-Session-Id explicitly — this is a best-effort fallback only.
-        normalized_first_text = " ".join(first_user_text.split())
-        session_id_header = BrainMiddleware.get_api_key_hash(
-            f"{api_key_hash_for_brain}:{normalized_first_text}"
-        )[:16]
-
     session_id = None
-    if enable_brain or enable_memory:
+    if enable_memory:
+        auth_header = request.headers.get("Authorization", "")
+        x_api_key = request.headers.get("x-api-key", "")
+        client_credential = auth_header[7:] if auth_header.startswith("Bearer ") else x_api_key
+        api_key_hash_for_memory = hashlib.sha256(client_credential.encode()).hexdigest()
+        if not session_id_header:
+            first_user = next((m for m in payload.get("messages", []) if m.get("role") == "user"), None)
+            normalized_first_text = " ".join(_memory_text(first_user.get("content", "") if first_user else "").split())
+            session_id_header = hashlib.sha256(
+                f"{api_key_hash_for_memory}:{normalized_first_text}".encode()
+            ).hexdigest()[:16]
         from app.database import get_or_create_session
         session_id = await get_or_create_session(
             identifier=session_id_header,
-            api_key_hash=api_key_hash_for_brain,
+            api_key_hash=api_key_hash_for_memory,
             model=payload.get("model")
         )
 
@@ -1006,20 +965,6 @@ async def messages(request: Request):
                 except Exception:
                     pass
                 session_history.append({"role": row["role"], "content": content_str})
-
-    # Brain: Build context from brain memory
-    brain_context = None
-    if enable_brain and user_message_text:
-        brain_context = await BrainMiddleware.build_brain_context(
-            api_key_hash=api_key_hash_for_brain,
-            user_message=user_message_text,
-            session_id=session_id,
-            enable_brain=enable_brain
-        )
-
-    # Brain: Inject brain context into payload
-    if brain_context:
-        payload = await BrainMiddleware.inject_brain_context(payload, brain_context)
 
     if provider == "bm":
         upstream_base_url = BLUESMINDS_BASE_URL
@@ -1251,8 +1196,7 @@ async def messages(request: Request):
                                     if first_token_time is None:
                                         first_token_time = time.time()
 
-                                    # Accumulate response content for brain persistence
-                                    if (enable_brain or enable_memory) and session_id:
+                                    if enable_memory and session_id:
                                         try:
                                             # Parse SSE chunk to extract content
                                             if chunk.startswith("event: content_block_start\ndata: "):
@@ -1302,13 +1246,11 @@ async def messages(request: Request):
                                 final_response = [
                                     block for block in accumulated_response if block is not None
                                 ]
-                                if (enable_brain or enable_memory) and user_message_text:
-                                    await _save_brain_exchange(
+                                if enable_memory and user_message_text:
+                                    await _save_memory_exchange(
                                         session_id=session_id,
-                                        api_key_hash=api_key_hash_for_brain,
                                         user_content=user_message_text,
                                         assistant_content=final_response,
-                                        model=log_model,
                                     )
 
                                 threshold = config_module.SLOW_RESPONSE_THRESHOLD_MS
@@ -1475,13 +1417,11 @@ async def messages(request: Request):
                 add_request_log(log_model, 200, current_key, rotated_occurred, total_ms, input_tokens, output_tokens, cached_tokens)
                 await _bill_router_key(request, input_tokens + output_tokens)
 
-                if (enable_brain or enable_memory) and user_message_text:
-                    await _save_brain_exchange(
+                if enable_memory and user_message_text:
+                    await _save_memory_exchange(
                         session_id=session_id,
-                        api_key_hash=api_key_hash_for_brain,
                         user_content=user_message_text,
                         assistant_content=anthropic_resp.get("content", []),
-                        model=log_model,
                     )
 
                 threshold = config_module.SLOW_RESPONSE_THRESHOLD_MS
@@ -1956,66 +1896,6 @@ async def chat_completions(request: Request):
     if not api_keys_to_use:
         return JSONResponse(status_code=500, content={"error": {"message": "No upstream API keys available"}})
 
-    messages = payload.get("messages") or []
-    user_message_text = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                user_message_text = content
-            elif isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif isinstance(block.get("text"), str):
-                            text_parts.append(block.get("text"))
-                    elif isinstance(block, str):
-                        text_parts.append(block)
-                user_message_text = "\n".join(text_parts)
-            break
-
-    auth_header = request.headers.get("Authorization", "")
-    x_api_key = request.headers.get("x-api-key", "")
-    client_credential = auth_header[7:] if auth_header.startswith("Bearer ") else x_api_key
-    api_key_hash_for_brain = BrainMiddleware.get_api_key_hash(client_credential)
-    session_id_header = request.headers.get("X-Session-Id")
-    if not session_id_header:
-        session_id_header = BrainMiddleware.get_api_key_hash(
-            f"{api_key_hash_for_brain}:{user_message_text[:200]}"
-        )[:16]
-
-    enable_brain = request.headers.get("X-Enable-Brain", "false").lower() == "true"
-    session_id = None
-    if enable_brain:
-        from app.database import get_or_create_session
-        session_id = await get_or_create_session(
-            identifier=session_id_header,
-            api_key_hash=api_key_hash_for_brain,
-            model=requested_model,
-        )
-
-    if enable_brain and user_message_text:
-        brain_context = await BrainMiddleware.build_brain_context(
-            api_key_hash=api_key_hash_for_brain,
-            user_message=user_message_text,
-            session_id=session_id,
-            enable_brain=enable_brain,
-        )
-        if brain_context:
-            payload_messages = list(messages)
-            system_index = next((i for i, msg in enumerate(payload_messages) if msg.get("role") == "system"), None)
-            if system_index is None:
-                payload_messages.insert(0, {"role": "system", "content": brain_context.strip()})
-            else:
-                existing = payload_messages[system_index].get("content", "")
-                payload_messages[system_index] = {
-                    **payload_messages[system_index],
-                    "content": f"{existing}{brain_context}" if isinstance(existing, str) else brain_context.strip(),
-                }
-            payload["messages"] = payload_messages
-
     upstream_endpoint = f"{upstream_base_url.rstrip('/')}/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -2105,12 +1985,6 @@ async def chat_completions(request: Request):
                 real_content = message.get("content")
 
                 # Strip thinking tags for -thinking/-agentic models in OpenAI format.
-                # Only touches real_content -- a tool-call-only message has no
-                # `content` at all, and the JSON-dump fallback built below (for
-                # brain memory, which needs *something* to log) must never get
-                # written back into the actual response's `content` field, or a
-                # pure tool call comes back with its content replaced by a
-                # stringified copy of its own tool_calls array.
                 if real_content and isinstance(real_content, str):
                     if requested_model.endswith(("-thinking", "-agentic", "-thinking-agentic")):
                         import re
@@ -2119,21 +1993,6 @@ async def chat_completions(request: Request):
                             if "message" in content["choices"][0]:
                                 content["choices"][0]["message"]["content"] = real_content
 
-                # Brain memory needs some text to log even for a pure tool
-                # call; this fallback is intentionally kept separate from
-                # real_content above so it never leaks into the response.
-                assistant_content = real_content
-                if not assistant_content and message.get("tool_calls"):
-                    assistant_content = json.dumps(message.get("tool_calls"))
-
-                if enable_brain and user_message_text:
-                    await _save_brain_exchange(
-                        session_id=session_id,
-                        api_key_hash=api_key_hash_for_brain,
-                        user_content=user_message_text,
-                        assistant_content=assistant_content,
-                        model=requested_model,
-                    )
                 usage = content.get("usage", {}) if isinstance(content, dict) else {}
                 input_tokens = usage.get("prompt_tokens", 0) or 0
                 output_tokens = usage.get("completion_tokens", 0) or 0

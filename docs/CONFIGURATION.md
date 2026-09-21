@@ -19,7 +19,6 @@ Keep environment configuration small and stable. Use the dashboard for runtime i
 | `ADMIN_USERNAME` | Dashboard account name | Change the default |
 | `ADMIN_PASSWORD_HASH` | Preferred bcrypt admin verifier | Generate offline and protect as a secret |
 | `ADMIN_PASSWORD` | Plain password compatibility input | Avoid when a hash can be supplied |
-| `ROUTER_PASSWORD` | Legacy router and direct Brain password boundary | Use a long random value and plan migration to managed-key validation |
 | `SSL_KEYFILE` | Optional direct TLS private key | Prefer TLS termination at a maintained reverse proxy |
 | `SSL_CERTFILE` | Optional direct TLS certificate | Keep renewal outside the image lifecycle |
 
@@ -44,7 +43,6 @@ A threshold of zero disables the corresponding timing behavior where implemented
 | `MAX_HISTORY_MESSAGES` | Bound reconstructed history |
 | `MEMORY_RETENTION_DAYS` | Define application memory retention |
 
-Brain persistence has additional database-backed records and should be governed by an explicit retention policy. Memory can contain sensitive prompts and responses.
 
 ## Upstream configuration
 

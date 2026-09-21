@@ -24,10 +24,8 @@ Never paste production values into documentation, tickets, shell history, or com
 ```bash
 docker compose up -d --build
 docker compose ps
-curl --fail http://localhost:4000/brain/health
 ```
 
-Then verify an authenticated model listing with a dedicated test client key. A healthy Brain endpoint confirms the web process and reports accumulated Brain middleware counters. It does not actively verify PostgreSQL, embeddings, or any upstream provider.
 
 ## Health model
 
@@ -38,7 +36,6 @@ Check four layers separately:
 3. Router authentication and policy with `/v1/models`.
 4. A low-cost inference request for each provider family in service.
 
-The dashboard provides lifetime request totals, live activity, latency, status, key availability, routing statistics, and Brain monitoring. Alerting should come from external infrastructure because the dashboard itself depends on the application being healthy.
 
 ## Logs and sensitive data
 
@@ -48,7 +45,6 @@ Do not enable verbose HTTP logging that prints authorization headers or provider
 
 ## Backup
 
-Back up PostgreSQL before upgrades and provider policy changes. A usable backup includes schema and data for client keys, provider state, logs needed for accounting, playground state if retained, and Brain memory.
 
 Example with placeholders:
 
@@ -86,7 +82,6 @@ Inspect its available keys, limited timestamps, upstream status, model identifie
 
 Separate queueing, DNS, connection, time-to-first-token, and full-generation time. Compare the slow threshold with normal streaming behavior before lowering it. Aggressive rotation can amplify upstream load.
 
-### Brain unhealthy
 
 Check database connectivity, required tables, embedding model initialization, available disk and memory. Inference may remain available, but memory search and persistence can be incomplete.
 

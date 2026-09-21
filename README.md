@@ -5,7 +5,7 @@
 <h1 align="center">CustoRouter</h1>
 
 <p align="center">
-  A self-hosted AI gateway for compatible APIs, access policy, credential rotation, live operations, and searchable memory.
+  A self-hosted AI gateway for compatible APIs, access policy, credential rotation, and live operations.
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 </p>
 
 > [!CAUTION]
-> This gateway handles paid credentials, client access keys, prompts, responses, usage records, and persistent memory. Never commit secrets, production exports, TLS private keys, or request logs. Review [Security](docs/SECURITY.md) before public deployment.
+> This gateway handles paid credentials, client access keys, prompts, responses, and usage records. Never commit secrets, production exports, TLS private keys, or request logs. Review [Security](docs/SECURITY.md) before public deployment.
 
 ## Overview
 
@@ -34,7 +34,6 @@ The live upstream inventory is dynamic. Clients discover what is available throu
 | Routing | Resolves each model identifier to a built-in or database-configured upstream |
 | Resilience | Rotates limited credentials, applies cooldowns, detects slow responses, and uses bounded fallback |
 | Operations | Provides live activity, request history, key state, routing statistics, configuration, and a playground |
-| Brain | Stores client-scoped conversations, decisions, facts, profiles, summaries, and semantic retrieval |
 
 ## Architecture at a glance
 
@@ -48,7 +47,6 @@ flowchart TD
     F --> G[Upstream request]
     G --> H[Normalized stream or response]
     H --> I[Usage and request journal]
-    I --> J[Optional Brain persistence]
     J --> K[Client response]
 
     G -->|limited or slow| L[Rotate or bounded fallback]
@@ -56,7 +54,6 @@ flowchart TD
     C -->|rejected| M[Policy error]
 ```
 
-Brain work is best effort on the inference path. A Brain failure does not replace a successful upstream response. Direct custom-upstream dispatch currently has incomplete Brain coverage; the boundary is documented in [Architecture](docs/ARCHITECTURE.md).
 
 ## Request surfaces
 
@@ -66,8 +63,6 @@ Brain work is best effort on the inference path. A Brain failure does not replac
 | OpenAI-compatible chat | `POST /v1/chat/completions` | Router client key |
 | Anthropic-compatible messages | `POST /v1/messages` | Router client key |
 | Token count | `POST /v1/messages/count_tokens` | Router client key |
-| Brain status | `GET /brain/health` | Public health route |
-| Brain records and search | `/brain/*` | Router client-key validation and key-derived scope |
 | Operator dashboard | `/dashboard` | Admin session |
 | Live operator events | `/api/sse` | Admin session |
 
@@ -85,11 +80,8 @@ Inference accepts `Authorization: Bearer <key>` or `x-api-key: <key>`. A managed
 
 Policy is applied before an upstream credential is used. Aliases resolve before routing, so a stable client-facing name can move without exposing internal upstream details.
 
-## Brain memory
 
-Brain groups data by a hash derived from the supplied client credential. It can retain conversation context, decisions, facts, session summaries, and profile information, then retrieve relevant records semantically. Raw client credentials are not used as Brain record identifiers.
 
-The direct Brain API uses the same managed-key validator as inference routes. Records remain scoped to a hash of the calling credential. See [Brain integration](BRAIN_INTEGRATION.md) and [Security](docs/SECURITY.md).
 
 ## Operator dashboard
 
@@ -100,7 +92,6 @@ The dashboard provides:
 - provider credential state and cooldown controls;
 - custom upstream and model configuration;
 - client key policy management;
-- routing statistics and Brain monitoring;
 - an authenticated chat playground.
 
 The dashboard is an administrative surface. Place it behind TLS and a trusted network or identity-aware proxy.
@@ -118,7 +109,6 @@ The dashboard is an administrative surface. Place it behind TLS and a trusted ne
 ```bash
 cp .env.example .env
 docker compose up -d --build
-curl --fail http://localhost:4000/brain/health
 ```
 
 Open `http://localhost:4000/login` for the operator interface. Verify an authenticated model listing before sending inference traffic.
@@ -171,7 +161,7 @@ Detailed environment, deployment, backup, recovery, and incident procedures live
 
 ## Persistence
 
-PostgreSQL is authoritative for credentials and routing controls, managed client keys, request telemetry, playground sessions, and Brain memory. Application startup creates compatible schema objects. Back up the database before upgrades or bulk configuration changes.
+PostgreSQL stores runtime keys, provider configuration, request telemetry, and playground sessions. Back up the database before upgrades or bulk configuration changes.
 
 Exports and logs can contain secrets or sensitive prompt data. Store them encrypted, restrict access, and redact them before sharing.
 
@@ -180,7 +170,6 @@ Exports and logs can contain secrets or sensitive prompt data. Store them encryp
 - replace every example and fixed credential;
 - remove or privately bind the published PostgreSQL port;
 - terminate TLS at a maintained reverse proxy;
-- restrict dashboard and Brain access;
 - configure streaming-aware timeouts and request-size limits;
 - establish log retention, backup, restore, and key-rotation procedures;
 - test one bounded request for each active upstream route;
@@ -193,8 +182,6 @@ The included Compose file currently publishes PostgreSQL on host port `5432` and
 ```text
 app/
   main.py                 Startup and router assembly
-  routers/                Proxy, admin, playground, and Brain routes
-  services/               Dispatch, adapters, translation, and Brain services
   database.py             PostgreSQL access and schema setup
 templates/                Operator pages
 static/                   Dashboard browser assets
@@ -209,14 +196,12 @@ Dockerfile                Application image
 python -m compileall app
 ```
 
-`test_brain_integration.py` requires PostgreSQL and the local embedding runtime. Provider integration checks can consume quota, so use dedicated test credentials and a non-production database.
 
 ## Documentation
-
-Start with [DOCUMENTATION.md](DOCUMENTATION.md). It links the architecture, complete route inventory, operations handbook, security posture, and Brain implementation notes.
+Start with [DOCUMENTATION.md](DOCUMENTATION.md) for the architecture, API inventory, operations handbook, and security posture.
 
 ## Credits and license
 
-Built with Python, FastAPI, Uvicorn, PostgreSQL, asyncpg, HTTPX, FastEmbed, NumPy, bcrypt, Jinja, and Docker. Project names and trademarks belong to their respective owners.
+Built with Python, FastAPI, Uvicorn, PostgreSQL, asyncpg, HTTPX, bcrypt, Jinja, and Docker. Project names and trademarks belong to their respective owners.
 
 No public license is included. Source availability does not grant permission to copy, modify, redistribute, host, or create derivative works.

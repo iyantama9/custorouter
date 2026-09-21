@@ -2,7 +2,6 @@
 
 ## Scope
 
-CustoRouter handles provider credentials, managed client keys, administrator sessions, prompts, model responses, usage records, and long-lived Brain memory. Treat the service and its database as sensitive infrastructure.
 
 ## Current controls
 
@@ -11,7 +10,6 @@ CustoRouter handles provider credentials, managed client keys, administrator ses
 - Admin sessions use random, revocable, 12-hour tokens in `HttpOnly`, `Secure`, `SameSite=Strict` cookies. Sessions expire on process restart.
 - Login attempts are limited to 5 per client IP per 15 minutes and 30 total per minute within the application process.
 - Managed client keys support expiration, quota, model allowlists, aliases, and prompts.
-- Brain ownership uses a hash of the calling key.
 - Dashboard mutation routes require an authenticated admin session.
 
 ## Required production hardening
@@ -24,7 +22,6 @@ CustoRouter handles provider credentials, managed client keys, administrator ses
 6. Store `.env`, backups, exports, and logs with least-privilege filesystem permissions.
 7. Apply request body limits and streaming-aware timeouts at the proxy.
 8. Use a shared rate limiter if more than one application process serves login traffic.
-9. Set retention limits for request logs, playground data, and Brain memory.
 10. Rotate provider and router keys after suspected exposure.
 11. If `TRUST_PROXY_HEADERS=true`, set `TRUSTED_PROXY_IPS` to the exact address(es) of the reverse proxy as seen by the app (for Docker this is often the bridge gateway). Nginx must overwrite `X-Real-IP` with `$remote_addr`. Otherwise the login limiter groups users under the proxy IP.
 
@@ -35,7 +32,6 @@ CustoRouter handles provider credentials, managed client keys, administrator ses
 - Dashboard scripts still load from third-party CDNs, although their bytes are pinned with Subresource Integrity. The CSP permits inline/eval scripts for the current frontend architecture; migrate to self-hosted scripts and a nonce-based CSP for stronger XSS isolation.
 - No repository-wide security test suite currently exercises all provider adapters and admin mutations.
 - Startup-time schema changes do not provide the auditability and rollback guarantees of versioned migrations.
-- Custom-provider Brain coverage is incomplete.
 - Managed client-key token quotas are checked before and billed after inference, so concurrent requests can overrun a strict quota.
 
 These are deployment and engineering tasks, not implied guarantees. Operators must assess the exact deployed revision and network topology.
@@ -63,7 +59,6 @@ Treat aliases and model prompts as policy. A change can alter cost, behavior, da
 
 ## Network boundaries
 
-Recommended public routes are the compatible inference endpoints and the minimal health route required by infrastructure. Brain access should be exposed only to intended clients. Admin, playground, logs, SSE, provider configuration, and key management should remain on a trusted network.
 
 ## Data protection
 

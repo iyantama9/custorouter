@@ -9,7 +9,6 @@ PostgreSQL stores four categories of state:
 | Routing | provider credentials, custom upstreams, disabled routes | Determines which outbound paths can serve a request |
 | Client access | managed router keys and policy fields | Determines who can call, what they can request, and how much they can consume |
 | Operations | request logs and server configuration | Supports monitoring, diagnosis, and usage accounting |
-| Conversation systems | playground sessions, messages, and Brain records | Stores user content and derived memory |
 
 ## Core tables
 
@@ -23,14 +22,9 @@ PostgreSQL stores four categories of state:
 | `server_config` | Mutable service configuration |
 | `chat_sessions` | Playground conversation containers |
 | `chat_messages` | Playground messages |
-| `brain_conversations` | Persisted conversation memory |
-| `brain_decisions` | Structured decisions and outcomes |
-| `brain_facts` | Structured facts and provenance fields |
-| `brain_profiles` | Per-client derived profile state |
 
 ## Identity boundaries
 
-Managed client-key records are the authorization source for compatible inference. Brain records use a hash of the supplied credential as their scope identifier. This avoids storing the raw credential as a foreign identifier, but a leaked credential still grants access according to the route authentication behavior.
 
 Admin sessions are separate from client keys. Provider credentials are separate from both and authorize outbound requests.
 
@@ -40,9 +34,7 @@ Request logs capture evidence used by dashboard totals and diagnosis. Managed ke
 
 Do not edit quota counters without an audit record. When totals disagree, compare the normalized response, terminal stream event, request log, and managed-key record.
 
-## Brain records
 
-Brain stores source text, derived vectors or searchable representation, session relationships, timestamps, and structured decision or fact fields. Profiles summarize client-scoped history. Retention and deletion must cover both direct records and derived information.
 
 ## Schema lifecycle
 

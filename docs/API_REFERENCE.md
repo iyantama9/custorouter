@@ -14,7 +14,6 @@ Authorization: Bearer <router-client-key>
 x-api-key: <router-client-key>
 ```
 
-Admin and playground management routes use the authenticated dashboard session cookie. Direct Brain routes read the same headers but currently compare them with the configured global router password when that password is present; they do not call the managed client-key validator. Route behavior remains authoritative because administrative endpoints can evolve faster than this document.
 
 ## Compatible inference
 
@@ -60,31 +59,6 @@ Reverse proxies must disable response buffering and allow long-lived connections
 
 `GET /v1/models` is the only documentation-safe source for the current inventory. The response is filtered by client policy and can change when upstreams, disabled routes, aliases, or allowlists change. This repository intentionally does not publish provider or model names in README tables.
 
-## Brain
-
-For built-in providers, inference Brain context is opt-in through `X-Enable-Brain: true`. Without that header, the router does not add Brain instructions or create a Brain session on the inference path. Built-in Anthropic-compatible requests can separately opt into conversation replay with `X-Enable-Memory: true`. Custom providers still bypass Brain. The router's generic system-prompt augmentation is disabled by default; a deployment can opt in with `AUGMENT_SYSTEM_PROMPT=true`. Per-key model prompts configured by the key owner still apply.
-
-Brain retrieval now reranks a bounded mix of recent and indexed topical candidates across conversations, facts, and decisions, so relevant older records can be recalled without scanning all stored embeddings. Current-session conversation records are excluded before ranking to avoid duplicate prompt context. Extracted facts and decisions come only from user messages; code blocks and quoted lines are ignored, and repeated facts do not trigger profile rebuilds. The injected context is size-bounded and explicitly marked as untrusted memory data. This improves retrieval efficiency and reduces false memories, but pattern-based extraction and semantic matching remain heuristic rather than guaranteed correct. The initial index build runs online and may take time on a large existing database.
-
-`GET /brain/health` is intentionally unauthenticated and reports Brain middleware counters. It does not actively probe PostgreSQL or the embedding model. Other Brain routes apply the password behavior described above and use the supplied key hash to scope data.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/brain/health` | Database and embedding health |
-| `POST` | `/brain/search/conversations` | Semantic conversation search |
-| `POST` | `/brain/search/decisions` | Search stored decisions |
-| `POST` | `/brain/search/facts` | Search stored facts |
-| `GET` | `/brain/profile` | Read the client profile |
-| `GET` | `/brain/session/{session_id}/summary` | Read a session summary |
-| `POST` | `/brain/decisions` | Create a decision record |
-| `GET` | `/brain/decisions` | List decisions |
-| `POST` | `/brain/facts` | Create a fact record |
-| `GET` | `/brain/facts` | List facts |
-
-Search, list, and summary responses are scoped to the hash of the calling client key.
-
-Conversation search accepts a JSON body containing `query`, optional `session_id`, optional `limit`, and optional `min_similarity`. Decision and fact search accept `query` with their supported filters. Create routes require the primary decision title or fact text and accept optional session and metadata fields.
-
 ## Dashboard and administration
 
 | Method | Path | Purpose |
@@ -99,8 +73,6 @@ Conversation search accepts a JSON body containing `query`, optional `session_id
 | `GET` | `/api/providers` | Provider state |
 | `GET` | `/api/models` | Administrative model inventory |
 | `GET` | `/api/routing/stats` | Routing statistics |
-| `GET` | `/api/brain/monitor` | Brain monitoring data |
-| `GET` | `/api/brain/session/{id}/messages` | Session message inspection |
 | `GET` | `/api/sse` | Live dashboard event stream |
 | `GET` | `/api/router-keys` | Managed client-key inventory |
 

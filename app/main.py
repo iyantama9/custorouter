@@ -26,7 +26,7 @@ from app.database import init_db, close_db
 import app.config as config_module
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
 from app.sse import sse_broadcaster
-from app.routers import admin, playground, proxy, brain
+from app.routers import admin, playground, proxy
 
 
 async def _build_status_dict():
@@ -81,6 +81,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+
+
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    """Lightweight liveness endpoint for the container orchestrator."""
+    return {"status": "ok"}
 
 
 _INFERENCE_REQUEST_PATHS = {
@@ -174,7 +180,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(admin.router)
 app.include_router(playground.router)
 app.include_router(proxy.router)
-app.include_router(brain.router)
 
 
 if __name__ == "__main__":

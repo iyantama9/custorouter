@@ -56,13 +56,6 @@
         <i data-lucide="message-square" class="w-4 h-4 shrink-0"></i>
         <span class="whitespace-nowrap overflow-hidden transition-all duration-300" :class="sidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'">Playground</span>
       </button>
-      <button @click="activeTab = 'brain'; sidebarOpen = false; fetchBrainMonitor()"
-              :title="sidebarCollapsed ? 'Brain Monitor' : ''"
-              class="w-full flex items-center px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150"
-              :class="[activeTab === 'brain' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-secondary', sidebarCollapsed ? 'justify-center gap-0' : 'gap-3']">
-        <i data-lucide="brain" class="w-4 h-4 shrink-0"></i>
-        <span class="whitespace-nowrap overflow-hidden transition-all duration-300" :class="sidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'">Brain Monitor</span>
-      </button>
       <button @click="activeTab = 'models'; sidebarOpen = false; fetchModels()"
               :title="sidebarCollapsed ? 'Models' : ''"
               class="w-full flex items-center px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150"
@@ -128,9 +121,9 @@
         </button>
         <div>
           <h1 class="font-display text-xl lg:text-2xl font-700 tracking-widest text-foreground uppercase leading-none"
-              x-text="activeTab === 'activity' ? 'Live Activity' : activeTab === 'keys' ? 'API Keys' : activeTab === 'playground' ? 'Playground' : activeTab === 'brain' ? 'Brain Monitor' : activeTab === 'models' ? 'Models' : 'Routing Setup'">Live Activity</h1>
+              x-text="activeTab === 'activity' ? 'Live Activity' : activeTab === 'keys' ? 'API Keys' : activeTab === 'playground' ? 'Playground' : activeTab === 'models' ? 'Models' : 'Routing Setup'">Live Activity</h1>
           <p class="text-[11px] text-muted-foreground mt-0.5"
-             x-text="activeTab === 'activity' ? 'Real-time request logs from the proxy' : activeTab === 'keys' ? 'Manage API key rotation and failover' : activeTab === 'playground' ? 'Test models directly' : activeTab === 'brain' ? 'Semantic memory, facts, decisions, and sessions' : activeTab === 'models' ? 'All available models across providers' : 'Visual failover routing'">
+             x-text="activeTab === 'activity' ? 'Real-time request logs from the proxy' : activeTab === 'keys' ? 'Manage API key rotation and failover' : activeTab === 'playground' ? 'Test models directly' : activeTab === 'models' ? 'All available models across providers' : 'Visual failover routing'">
           </p>
         </div>
       </div>
@@ -718,164 +711,7 @@
       </div>
       </template>
 
-      <!-- ===== BRAIN MONITOR TAB ===== -->
-      <template x-if="activeTab === 'brain'">
-      <div class="space-y-4">
 
-        <div class="flex flex-col sm:flex-row gap-3 sm:items-center justify-between">
-          <div class="flex items-center gap-2">
-            <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Brain Memory</span>
-            <span class="text-[9px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full border border-border font-mono"
-                  x-text="brain.loading ? 'loading' : `${formatNumber(brain.counts.conversations || 0)} messages`">—</span>
-          </div>
-          <button @click="fetchBrainMonitor()"
-                  class="text-[11px] font-medium border border-border px-3 py-1.5 rounded-xl bg-secondary hover:bg-secondary/60 transition-colors text-muted-foreground hover:text-foreground flex items-center gap-2">
-            <i data-lucide="refresh-cw" class="w-3 h-3" :class="brain.loading ? 'animate-spin' : ''"></i>
-            Refresh Brain
-          </button>
-        </div>
-
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <template x-for="card in brainCards" :key="card.label">
-            <div class="bg-card border border-border rounded-2xl p-4 relative overflow-hidden group hover:border-primary/30 transition-colors duration-200">
-              <div class="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-accent/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200"></div>
-              <div class="flex items-center gap-2 mb-3">
-                <i :data-lucide="card.icon" class="w-3.5 h-3.5 text-muted-foreground/60"></i>
-                <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono" x-text="card.label"></span>
-              </div>
-              <div class="text-2xl lg:text-3xl font-mono font-500 text-foreground tabular-nums leading-none mb-1" x-text="card.value">—</div>
-              <div class="text-[10px] text-muted-foreground/60" x-text="card.sub"></div>
-            </div>
-          </template>
-        </div>
-
-        <div class="grid lg:grid-cols-3 gap-4">
-          <div class="lg:col-span-2 bg-card border border-border rounded-2xl overflow-hidden">
-            <div class="px-4 py-3 border-b border-border flex items-center justify-between">
-              <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Recent Memory Writes</span>
-              <span class="text-[9px] text-muted-foreground font-mono" x-text="`${brain.recent_conversations.length} rows`"></span>
-            </div>
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="border-b border-border/60">
-                    <th class="text-left px-4 py-3 text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] font-mono">Time</th>
-                    <th class="text-left px-4 py-3 text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] font-mono">Role</th>
-                    <th class="text-left px-4 py-3 text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] font-mono">Session</th>
-                    <th class="text-left px-4 py-3 text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] font-mono">Content</th>
-                    <th class="text-left px-4 py-3 text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] font-mono">Embed</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template x-if="brain.loading">
-                    <tr><td colspan="5" class="px-4 py-5"><div class="animate-shimmer h-5 rounded max-w-xs mx-auto"></div></td></tr>
-                  </template>
-                  <template x-if="!brain.loading && !brain.recent_conversations.length">
-                    <tr>
-                      <td colspan="5" class="px-4 py-14 text-center">
-                        <div class="flex flex-col items-center gap-3 text-muted-foreground">
-                          <i data-lucide="brain" class="w-8 h-8 opacity-20"></i>
-                          <p class="text-sm font-medium">No brain memories yet</p>
-                          <p class="text-xs opacity-50">Conversation memory writes will appear here</p>
-                        </div>
-                      </td>
-                    </tr>
-                  </template>
-                  <template x-for="row in brain.recent_conversations" :key="row.id">
-                    <tr class="border-b border-border/40 hover:bg-secondary/15 transition-colors">
-                      <td class="px-4 py-3 font-mono text-[11px] text-muted-foreground whitespace-nowrap" x-text="fmtDate(row.created_at)"></td>
-                      <td class="px-4 py-3">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono border"
-                              :class="row.role === 'user' ? 'bg-primary/8 text-primary border-primary/20' : 'bg-accent/8 text-accent border-accent/20'"
-                              x-text="row.role"></span>
-                      </td>
-                      <td class="px-4 py-3 font-mono text-[11px] text-muted-foreground max-w-[130px] truncate" x-text="row.project_identifier || row.session_name || row.session_id"></td>
-                      <td class="px-4 py-3 text-xs text-foreground/80 max-w-[360px]">
-                        <button @click="openBrainMemory(row)"
-                                class="text-left max-w-[360px] truncate hover:text-primary transition-colors underline-offset-4 hover:underline"
-                                :title="row.content_preview"
-                                x-text="row.content_preview"></button>
-                      </td>
-                      <td class="px-4 py-3">
-                        <span class="inline-flex items-center gap-1 text-[10px] font-mono" :class="row.has_embedding ? 'text-accent' : 'text-muted-foreground/50'">
-                          <span class="w-1.5 h-1.5 rounded-full" :class="row.has_embedding ? 'bg-accent' : 'bg-muted-foreground/40'"></span>
-                          <span x-text="row.has_embedding ? 'yes' : 'no'"></span>
-                        </span>
-                      </td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="bg-card border border-border rounded-2xl overflow-hidden">
-            <div class="px-4 py-3 border-b border-border">
-              <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Hot Sessions</span>
-            </div>
-            <div class="divide-y divide-border/50">
-              <template x-if="!brain.top_sessions.length">
-                <div class="px-4 py-10 text-center text-xs text-muted-foreground">No sessions yet</div>
-              </template>
-              <template x-for="s in brain.top_sessions" :key="s.id">
-                <button @click="openSessionDetail(s)"
-                        class="w-full px-4 py-3 hover:bg-secondary/15 transition-colors text-left">
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="min-w-0">
-                      <p class="text-xs font-medium text-foreground truncate hover:text-primary transition-colors underline-offset-4 hover:underline" x-text="s.project_identifier || s.name"></p>
-                      <p class="text-[10px] text-muted-foreground font-mono truncate" x-text="s.last_model || 'model unknown'"></p>
-                    </div>
-                    <span class="text-[11px] font-mono text-accent shrink-0" x-text="formatNumber(s.brain_messages)"></span>
-                  </div>
-                </button>
-              </template>
-            </div>
-          </div>
-        </div>
-
-        <div class="grid lg:grid-cols-2 gap-4">
-          <div class="bg-card border border-border rounded-2xl overflow-hidden">
-            <div class="px-4 py-3 border-b border-border">
-              <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Recent Decisions</span>
-            </div>
-            <div class="divide-y divide-border/50">
-              <template x-if="!brain.recent_decisions.length"><div class="px-4 py-10 text-center text-xs text-muted-foreground">No decisions extracted yet</div></template>
-              <template x-for="d in brain.recent_decisions" :key="d.id">
-                <div class="px-4 py-3">
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <p class="text-sm font-medium text-foreground truncate" x-text="d.title"></p>
-                      <p class="text-xs text-muted-foreground mt-1 line-clamp-2" x-text="d.detail_preview || d.decision_type || 'decision captured'"></p>
-                    </div>
-                    <span class="text-[10px] font-mono text-muted-foreground shrink-0" x-text="fmtDate(d.created_at)"></span>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </div>
-
-          <div class="bg-card border border-border rounded-2xl overflow-hidden">
-            <div class="px-4 py-3 border-b border-border">
-              <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Recent Facts</span>
-            </div>
-            <div class="divide-y divide-border/50">
-              <template x-if="!brain.recent_facts.length"><div class="px-4 py-10 text-center text-xs text-muted-foreground">No facts extracted yet</div></template>
-              <template x-for="f in brain.recent_facts" :key="f.id">
-                <div class="px-4 py-3">
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <p class="text-sm font-medium text-foreground line-clamp-2" x-text="f.fact"></p>
-                      <p class="text-[10px] text-muted-foreground font-mono mt-1" x-text="`${f.category || 'general'} · confidence ${Number(f.confidence || 0).toFixed(2)}`"></p>
-                    </div>
-                    <span class="text-[10px] font-mono text-muted-foreground shrink-0" x-text="fmtDate(f.created_at)"></span>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </div>
-        </div>
-      </div>
-      </template>
 
       <!-- ===== MODELS TAB ===== -->
       <template x-if="activeTab === 'models'">
@@ -1212,121 +1048,7 @@
     </div>
   </main>
 
-  <!-- Brain Memory Detail Modal -->
-  <div x-show="brain.selected" x-transition.opacity
-       class="fixed inset-0 z-[90] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
-       @keydown.escape.window="brain.selected = null">
-    <div class="absolute inset-0" @click="brain.selected = null"></div>
-    <div class="relative w-full max-w-3xl max-h-[82vh] bg-card border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-      <div class="px-5 py-4 border-b border-border flex items-start justify-between gap-4">
-        <div class="min-w-0">
-          <div class="flex items-center gap-2 mb-2">
-            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono border"
-                  :class="brain.selected?.role === 'user' ? 'bg-primary/8 text-primary border-primary/20' : 'bg-accent/8 text-accent border-accent/20'"
-                  x-text="brain.selected?.role"></span>
-            <span class="text-[10px] font-mono text-muted-foreground" x-text="fmtDate(brain.selected?.created_at)"></span>
-          </div>
-          <h3 class="font-display text-lg font-700 tracking-wide text-foreground">Brain Memory Context</h3>
-          <p class="text-xs text-muted-foreground font-mono truncate mt-1"
-             x-text="`${brain.selected?.project_identifier || brain.selected?.session_name || brain.selected?.session_id || 'session'} · ${brain.selected?.model || 'model unknown'}`"></p>
-        </div>
-        <button @click="brain.selected = null"
-                class="p-2 rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors shrink-0">
-          <i data-lucide="x" class="w-4 h-4"></i>
-        </button>
-      </div>
-      <div class="p-5 overflow-y-auto">
-        <pre class="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground font-mono bg-background/60 border border-border rounded-2xl p-4" x-text="formatBrainContent(brain.selected?.content)"></pre>
-      </div>
-      <div class="px-5 py-3 border-t border-border flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between text-[10px] font-mono text-muted-foreground">
-        <span x-text="brain.selected?.has_embedding ? 'embedding: yes' : 'embedding: no'"></span>
-        <span x-text="`user hash: ${brain.selected?.user_hash || '—'}`"></span>
-      </div>
-    </div>
-  </div>
 
-  <!-- Session Detail Modal -->
-  <div x-show="brain.selectedSession" x-transition.opacity
-       class="fixed inset-0 z-[90] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
-       @keydown.escape.window="brain.selectedSession = null">
-    <div class="absolute inset-0" @click="brain.selectedSession = null"></div>
-    <div class="relative w-full max-w-4xl max-h-[85vh] bg-card border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-      <div class="px-5 py-4 border-b border-border flex items-start justify-between gap-4 shrink-0">
-        <div class="min-w-0">
-          <div class="flex items-center gap-2 mb-2">
-            <i data-lucide="messages-square" class="w-4 h-4 text-accent"></i>
-            <span class="text-[10px] font-mono text-muted-foreground" x-text="fmtDate(brain.selectedSession?.last_memory_at)"></span>
-          </div>
-          <h3 class="font-display text-lg font-700 tracking-wide text-foreground">Session Messages</h3>
-          <p class="text-xs text-muted-foreground font-mono truncate mt-1"
-             x-text="brain.selectedSession?.project_identifier || brain.selectedSession?.name || `Session #${brain.selectedSession?.id}`"></p>
-        </div>
-        <button @click="brain.selectedSession = null"
-                class="p-2 rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors shrink-0">
-          <i data-lucide="x" class="w-4 h-4"></i>
-        </button>
-      </div>
-
-      <div class="px-5 py-3 border-b border-border bg-secondary/30 shrink-0">
-        <div class="grid grid-cols-3 gap-3 text-center">
-          <div>
-            <p class="text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] mb-1">Messages</p>
-            <p class="text-lg font-mono font-600 text-accent" x-text="formatNumber(brain.selectedSession?.brain_messages || 0)"></p>
-          </div>
-          <div>
-            <p class="text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] mb-1">Session ID</p>
-            <p class="text-lg font-mono font-600 text-foreground" x-text="`#${brain.selectedSession?.id || '—'}`"></p>
-          </div>
-          <div>
-            <p class="text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] mb-1">Model</p>
-            <p class="text-xs font-mono font-600 text-foreground truncate" x-text="brain.selectedSession?.last_model || 'unknown'"></p>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex-1 overflow-y-auto p-5 space-y-3 min-h-0">
-        <template x-if="brain.loadingMessages">
-          <div class="flex items-center justify-center py-10">
-            <div class="flex flex-col items-center gap-3">
-              <i data-lucide="loader-2" class="w-8 h-8 text-primary animate-spin"></i>
-              <p class="text-sm text-muted-foreground">Loading messages...</p>
-            </div>
-          </div>
-        </template>
-
-        <template x-if="!brain.loadingMessages && !brain.sessionMessages.length">
-          <div class="flex items-center justify-center py-10">
-            <div class="flex flex-col items-center gap-3 text-muted-foreground">
-              <i data-lucide="message-circle" class="w-8 h-8 opacity-20"></i>
-              <p class="text-sm">No messages found</p>
-            </div>
-          </div>
-        </template>
-
-        <template x-if="!brain.loadingMessages && brain.sessionMessages.length">
-          <template x-for="(msg, idx) in brain.sessionMessages" :key="msg.id">
-            <button @click="openBrainMemory({...msg, session_id: brain.selectedSession.id, project_identifier: brain.selectedSession.project_identifier, session_name: brain.selectedSession.name, user_hash: brain.selectedSession.user_hash})"
-                    class="w-full text-left bg-secondary/50 border border-border rounded-xl p-4 hover:border-primary/40 hover:bg-secondary/70 transition-all group">
-              <div class="flex items-start justify-between gap-3 mb-2">
-                <div class="flex items-center gap-2">
-                  <span class="text-[10px] font-mono text-muted-foreground" x-text="`#${idx + 1}`"></span>
-                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono border"
-                        :class="msg.role === 'user' ? 'bg-primary/8 text-primary border-primary/20' : 'bg-accent/8 text-accent border-accent/20'"
-                        x-text="msg.role"></span>
-                  <span class="inline-flex items-center gap-1 text-[10px] font-mono" :class="msg.has_embedding ? 'text-accent' : 'text-muted-foreground/50'">
-                    <span class="w-1.5 h-1.5 rounded-full" :class="msg.has_embedding ? 'bg-accent' : 'bg-muted-foreground/40'"></span>
-                    <span x-text="msg.has_embedding ? 'embedded' : 'no embed'"></span>
-                  </span>
-                </div>
-                <span class="text-[10px] font-mono text-muted-foreground shrink-0" x-text="fmtDate(msg.created_at)"></span>
-              </div>
-              <p class="text-sm text-foreground/80 line-clamp-2 group-hover:text-foreground transition-colors" x-text="msg.content_preview"></p>
-            </button>
-          </template>
-        </template>
-      </div>
-    </div>
-  </div>
 
   <!-- Add Provider Modal -->
   <div x-show="providerMgmt.showAddForm" x-transition.opacity
@@ -1655,19 +1377,6 @@ function dashboard() {
       stickToBottom: true
     },
 
-    brain: {
-      loading: false,
-      loaded: false,
-      counts: {},
-      recent_conversations: [],
-      top_sessions: [],
-      recent_decisions: [],
-      recent_facts: [],
-      selected: null,
-      selectedSession: null,
-      sessionMessages: [],
-      loadingMessages: false
-    },
     routerKeys: {
       keys: [],
       newKeyName: '',
@@ -1797,10 +1506,6 @@ function dashboard() {
         this.$nextTick(() => window.refreshLucideIcons());
         if (v === 'routing') {
           this.fetchRoutingStats();
-        }
-        // Lazy load brain monitor only when tab is switched
-        if (v === 'brain' && !this.brain.loaded) {
-          this.fetchBrainMonitor();
         }
         // Lazy load playground data only when tab is switched
         if (v === 'playground' && !this.pg.loaded) {
@@ -2025,16 +1730,6 @@ function dashboard() {
       return [cur-1, cur, cur+1];
     },
 
-    get brainCards() {
-      const c = this.brain.counts || {};
-      return [
-        { label: 'Messages', icon: 'message-circle', value: this.formatNumber(c.conversations || 0), sub: `${this.formatNumber(c.messages_24h || 0)} in 24h` },
-        { label: 'Embeddings', icon: 'scan-search', value: this.formatNumber(c.embedded_messages || 0), sub: 'semantic index rows' },
-        { label: 'Decisions', icon: 'git-branch', value: this.formatNumber(c.decisions || 0), sub: `${this.formatNumber(c.facts || 0)} facts stored` },
-        { label: 'Users', icon: 'users', value: this.formatNumber(c.users || 0), sub: `${this.formatNumber(c.sessions || 0)} sessions` }
-      ];
-    },
-
     sortBy(col) {
       if (this.logs.sort_by === col) {
         this.logs.sort_order = this.logs.sort_order === 'DESC' ? 'ASC' : 'DESC';
@@ -2204,79 +1899,6 @@ function dashboard() {
       const d = new Date(value);
       if (Number.isNaN(d.getTime())) return value;
       return d.toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    },
-
-    openBrainMemory(row) {
-      this.brain.selected = row;
-      this.$nextTick(() => window.refreshLucideIcons());
-    },
-
-    openSessionDetail(session) {
-      this.brain.selectedSession = session;
-      this.brain.sessionMessages = [];
-      this.brain.loadingMessages = true;
-      this.fetchSessionMessages(session.id);
-      this.$nextTick(() => window.refreshLucideIcons());
-    },
-
-    async fetchSessionMessages(sessionId) {
-      try {
-        const r = await fetch(`/api/brain/session/${sessionId}/messages`);
-        if (!r.ok) return;
-        const d = await r.json();
-        this.brain.sessionMessages = d.messages || [];
-      } catch (e) {
-        this.toast('Failed to load messages', 'error');
-      } finally {
-        this.brain.loadingMessages = false;
-        this.$nextTick(() => window.refreshLucideIcons());
-      }
-    },
-
-    formatBrainContent(content) {
-      if (!content) return '';
-      if (typeof content !== 'string') return JSON.stringify(content, null, 2);
-      try {
-        const parsed = JSON.parse(content);
-        if (Array.isArray(parsed)) {
-          return parsed.map(block => {
-            if (typeof block === 'string') return block;
-            if (block?.type === 'text') return block.text || '';
-            if (block?.type === 'thinking') return `[Thinking]\n${block.thinking || ''}`;
-            if (block?.type === 'tool_use') return `[Tool Use: ${block.name || 'tool'}]\n${JSON.stringify(block.input || {}, null, 2)}`;
-            if (block?.type === 'tool_result') return `[Tool Result]\n${block.content || ''}`;
-            return JSON.stringify(block, null, 2);
-          }).join('\n\n');
-        }
-        return JSON.stringify(parsed, null, 2);
-      } catch {
-        return content;
-      }
-    },
-
-    async fetchBrainMonitor() {
-      this.brain.loading = true;
-      try {
-        const r = await fetch('/api/brain/monitor');
-        if (!r.ok) { if (r.status === 401) window.location = '/login'; return; }
-        const d = await r.json();
-        this.brain = {
-          loading: false,
-          loaded: true,
-          counts: d.counts || {},
-          recent_conversations: d.recent_conversations || [],
-          top_sessions: d.top_sessions || [],
-          recent_decisions: d.recent_decisions || [],
-          recent_facts: d.recent_facts || [],
-          selected: this.brain.selected,
-          selectedSession: this.brain.selectedSession
-        };
-        this.$nextTick(() => window.refreshLucideIcons());
-      } catch (e) {
-        this.toast('Brain monitor failed', 'error');
-      } finally {
-        this.brain.loading = false;
-      }
     },
 
     // ── Router API Keys ──
