@@ -1,6 +1,5 @@
 import json
 import ipaddress
-import hashlib
 import os
 import secrets
 import time
@@ -10,6 +9,7 @@ from fastapi import APIRouter, Request, Body, Cookie, Depends, Query, HTTPExcept
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 import httpx
+from redis.exceptions import RedisError
 
 import asyncio
 
@@ -23,6 +23,15 @@ from app.config import (
     ADMIN_USERNAME, verify_admin_password, get_paginated_logs,
 )
 from app.sse import sse_broadcaster
+from app.redis_store import (
+    clear_login_attempts,
+    consume_login_attempt,
+    create_session,
+    get_cached_json,
+    revoke_session,
+    set_cached_json,
+    validate_session,
+)
 from app.database import (
     fetch, fetch_one, create_router_api_key, get_router_api_keys, delete_router_api_key,
     update_router_api_key, reset_router_key_usage,
@@ -33,15 +42,12 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 
-_login_attempts: dict[str, list[float]] = {}
-_global_login_attempts: list[float] = []
-_sessions: dict[str, float] = {}
 _password_checks = asyncio.Semaphore(3)
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_GLOBAL_MAX_ATTEMPTS = 30
 _LOGIN_WINDOW_SECONDS = 15 * 60
 _LOGIN_GLOBAL_WINDOW_SECONDS = 60
-_SESSION_TTL_SECONDS = 12 * 60 * 60
+_SESSION_TTL_SECONDS = int(os.getenv("DASHBOARD_SESSION_TTL_SECONDS", str(14 * 24 * 60 * 60)))
 _TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
 _TRUSTED_PROXY_IPS = {
     address.strip() for address in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
@@ -62,43 +68,19 @@ def _client_ip(request: Request) -> str:
     return peer
 
 
-def _check_login_rate_limit(ip: str) -> bool:
-    now = time.time()
-    cutoff = now - _LOGIN_WINDOW_SECONDS
-    _global_login_attempts[:] = [t for t in _global_login_attempts if t > now - _LOGIN_GLOBAL_WINDOW_SECONDS]
-    for address, attempts in list(_login_attempts.items()):
-        recent = [t for t in attempts if t > cutoff]
-        if recent:
-            _login_attempts[address] = recent
-        else:
-            del _login_attempts[address]
-    return (len(_login_attempts.get(ip, [])) < _LOGIN_MAX_ATTEMPTS
-            and len(_global_login_attempts) < _LOGIN_GLOBAL_MAX_ATTEMPTS)
-
-
-def _record_login_attempt(ip: str):
-    now = time.time()
-    _login_attempts.setdefault(ip, []).append(now)
-    _global_login_attempts.append(now)
-
-
-def _session_hash(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
-def _valid_session(token: str | None) -> bool:
-    if not token or len(token) > 128:
-        return False
-    digest = _session_hash(token)
-    expires_at = _sessions.get(digest, 0)
-    if expires_at <= time.time():
-        _sessions.pop(digest, None)
-        return False
-    return True
+async def _valid_session(token: str | None) -> bool:
+    return await validate_session(token, _SESSION_TTL_SECONDS)
 
 
 async def require_auth(session_token: str = Cookie(default=None)):
-    if not _valid_session(session_token):
+    try:
+        valid = await _valid_session(session_token)
+    except (RedisError, RuntimeError):
+        # Never degrade to an in-memory or fail-open auth path. A transient
+        # Redis outage should be visible as service unavailable, not a login
+        # failure that trains the user to repeatedly enter credentials.
+        raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable")
+    if not valid:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
 
@@ -136,14 +118,14 @@ async def get_root():
 
 @router.get("/login", response_class=HTMLResponse)
 async def get_login(request: Request, session_token: str = Cookie(default=None)):
-    if _valid_session(session_token):
+    if await _valid_session(session_token):
         return RedirectResponse(url="/dashboard", status_code=303)
     return templates.TemplateResponse(request=request, name="login.html")
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request, session_token: str = Cookie(default=None)):
-    if not _valid_session(session_token):
+    if not await _valid_session(session_token):
         return RedirectResponse(url="/login", status_code=303)
     return templates.TemplateResponse(request=request, name="dashboard.html")
 
@@ -151,11 +133,18 @@ async def get_dashboard(request: Request, session_token: str = Cookie(default=No
 @router.post("/api/login")
 async def api_login(request: Request):
     client_ip = _client_ip(request)
-    if not _check_login_rate_limit(client_ip):
+    try:
+        allowed = await consume_login_attempt(
+            client_ip,
+            per_ip_limit=_LOGIN_MAX_ATTEMPTS,
+            per_ip_window=_LOGIN_WINDOW_SECONDS,
+            global_limit=_LOGIN_GLOBAL_MAX_ATTEMPTS,
+            global_window=_LOGIN_GLOBAL_WINDOW_SECONDS,
+        )
+    except (RedisError, RuntimeError):
+        return JSONResponse(status_code=503, content={"success": False, "message": "Authentication service temporarily unavailable."})
+    if not allowed:
         return JSONResponse(status_code=429, content={"success": False, "message": "Too many login attempts. Try again later."})
-    # Reserve the slot before bcrypt yields to another coroutine. Otherwise
-    # concurrent guesses can all pass the limit before any failure is counted.
-    _record_login_attempt(client_ip)
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
@@ -179,13 +168,15 @@ async def api_login(request: Request):
         except ValueError:
             password_ok = False
     if username == ADMIN_USERNAME and password_ok:
-        _login_attempts.pop(client_ip, None)
-        now = time.time()
-        for digest, expires_at in list(_sessions.items()):
-            if expires_at <= now:
-                del _sessions[digest]
+        try:
+            await clear_login_attempts(client_ip)
+        except (RedisError, RuntimeError):
+            return JSONResponse(status_code=503, content={"success": False, "message": "Authentication service temporarily unavailable."})
         token = secrets.token_urlsafe(32)
-        _sessions[_session_hash(token)] = now + _SESSION_TTL_SECONDS
+        try:
+            await create_session(token, _SESSION_TTL_SECONDS)
+        except (RedisError, RuntimeError):
+            return JSONResponse(status_code=503, content={"success": False, "message": "Authentication service temporarily unavailable."})
         return JSONResponse(
             content={"success": True},
             headers={
@@ -197,8 +188,10 @@ async def api_login(request: Request):
 
 @router.post("/api/logout")
 async def api_logout(session_token: str = Cookie(default=None)):
-    if session_token:
-        _sessions.pop(_session_hash(session_token), None)
+    try:
+        await revoke_session(session_token)
+    except (RedisError, RuntimeError):
+        return JSONResponse(status_code=503, content={"success": False, "message": "Authentication service temporarily unavailable."})
     return JSONResponse(
         content={"success": True},
         headers={
@@ -238,7 +231,22 @@ async def api_logs(
     sort_by: str = Query("created_at"),
     sort_order: str = Query("DESC")
 ):
-    return await get_paginated_logs(page, per_page, search, sort_by, sort_order)
+    # A dashboard can issue the same query from polling and a live-event
+    # refresh at nearly the same time. A tiny shared cache removes duplicate
+    # PostgreSQL scans without making the activity view materially stale.
+    cache_key = f"dashboard-logs:v1:{page}:{per_page}:{search}:{sort_by}:{sort_order}"
+    try:
+        cached = await get_cached_json(cache_key)
+        if cached is not None:
+            return cached
+    except (RedisError, RuntimeError):
+        pass
+    result = await get_paginated_logs(page, per_page, search, sort_by, sort_order)
+    try:
+        await set_cached_json(cache_key, result, 2)
+    except (RedisError, RuntimeError):
+        pass
+    return result
 
 
 async def _probe_provider(client: httpx.AsyncClient, prefix: str, info: dict, key: str) -> str | None:
@@ -611,6 +619,14 @@ async def routing_stats_endpoint(range: str = Query("today"), user: None = Depen
     if range not in _ROUTING_RANGES:
         return JSONResponse(status_code=400, content={"error": f"range must be one of {list(_ROUTING_RANGES)}"})
 
+    cache_key = f"routing-stats:v1:{range}"
+    try:
+        cached = await get_cached_json(cache_key)
+        if cached is not None:
+            return cached
+    except (RedisError, RuntimeError):
+        pass
+
     # The rest of the app reports timestamps in UTC+7, so "today" means
     # midnight local, not midnight UTC.
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -691,7 +707,7 @@ async def routing_stats_endpoint(range: str = Query("today"), user: None = Depen
         LIMIT 25
     """, cutoff)
 
-    return {
+    result = {
         "range": range,
         "since": cutoff.isoformat(),
         "totals": {
@@ -717,6 +733,11 @@ async def routing_stats_endpoint(range: str = Query("today"), user: None = Depen
             for r in recent
         ],
     }
+    try:
+        await set_cached_json(cache_key, result, 2)
+    except (RedisError, RuntimeError):
+        pass
+    return result
 
 
 @router.get("/api/sse")

@@ -16,7 +16,7 @@ from app.translator_openai import (
     openai_tool_choice_to_anthropic,
     openai_tools_to_anthropic,
 )
-from app.routers import admin, proxy
+from app.routers import admin, playground, proxy
 from app.sse import SSEBroadcaster
 
 
@@ -33,16 +33,21 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
                         "client": (ip, 12345)}, receive)
 
     def setUp(self):
-        admin._login_attempts.clear()
-        admin._global_login_attempts.clear()
-        admin._sessions.clear()
+        self.login_gate = patch.object(admin, "consume_login_attempt", AsyncMock(return_value=True))
+        self.create_session = patch.object(admin, "create_session", AsyncMock())
+        self.revoke_session = patch.object(admin, "revoke_session", AsyncMock())
+        self.clear_attempts = patch.object(admin, "clear_login_attempts", AsyncMock())
+        self.validate_session = patch.object(admin, "validate_session", AsyncMock(return_value=False))
+        for mocked in (self.login_gate, self.create_session, self.revoke_session,
+                       self.clear_attempts, self.validate_session):
+            mocked.start()
         config.MIGRATION_DRAIN_ENABLED = False
         config.active_inference_requests = 0
 
     def tearDown(self):
-        admin._login_attempts.clear()
-        admin._global_login_attempts.clear()
-        admin._sessions.clear()
+        for mocked in (self.login_gate, self.create_session, self.revoke_session,
+                       self.clear_attempts, self.validate_session):
+            mocked.stop()
         config.MIGRATION_DRAIN_ENABLED = False
         config.active_inference_requests = 0
 
@@ -54,13 +59,14 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         cookie = response.headers["set-cookie"]
         token = cookie.split("session_token=", 1)[1].split(";", 1)[0]
         self.assertNotEqual(token, config.SESSION_SECRET)
-        self.assertTrue(admin._valid_session(token))
+        admin.create_session.assert_awaited_once_with(token, admin._SESSION_TTL_SECONDS)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("Secure", cookie)
         await admin.api_logout(token)
-        self.assertFalse(admin._valid_session(token))
+        admin.revoke_session.assert_awaited_once_with(token)
 
     async def test_login_rate_limit_reserves_attempts_before_password_check(self):
+        admin.consume_login_attempt.side_effect = [True] * 5 + [False]
         with patch.object(admin, "verify_admin_password", return_value=False):
             responses = [await admin.api_login(self._login_request({"username": "wrong", "password": "wrong"},
                                                                       "198.51.100.9"))
@@ -166,6 +172,37 @@ class HttpClientLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await proxy.close_http_clients()
         self.assertTrue(upstream.is_closed)
         self.assertTrue(custom.is_closed)
+
+
+class PlaygroundPrivacyAndRoutingTests(unittest.TestCase):
+    def test_builtin_provider_resolution_is_shared_for_qwen(self):
+        self.assertEqual(proxy._builtin_provider_for_model("qc/qwen-plus"), "qc")
+        self.assertEqual(proxy._builtin_provider_for_model("dh/claude"), "dahl")
+
+    def test_playground_strips_reasoning_fields_and_tagged_thought(self):
+        event = {
+            "choices": [{"delta": {
+                "reasoning_content": "private chain of thought",
+                "content": "Answer <thinking>private thought</thinking> done",
+            }}]
+        }
+        line = "data: " + json.dumps(event) + "\n"
+        stripper = playground._ThinkingStripper()
+        safe = playground._sanitize_openai_sse_line(line, stripper)
+        parsed = json.loads(safe[0][6:])
+        delta = parsed["choices"][0]["delta"]
+        self.assertNotIn("reasoning_content", delta)
+        # The trailing text remains in the stripper until the terminal event.
+        done = playground._sanitize_openai_sse_line("data: [DONE]\n", stripper)
+        visible = delta.get("content", "")
+        if len(done) == 2:
+            visible += json.loads(done[0][6:])["choices"][0]["delta"]["content"]
+        self.assertEqual(visible, "Answer  done")
+
+    def test_playground_thinking_stripper_handles_split_tags(self):
+        stripper = playground._ThinkingStripper()
+        self.assertEqual(stripper.feed("Visible <thi"), "Visible ")
+        self.assertEqual(stripper.feed("nking>secret</think> final", final=True), " final")
 
 
 class DatabaseHotPathTests(unittest.IsolatedAsyncioTestCase):

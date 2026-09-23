@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.database import init_db, close_db
+from app.redis_store import init_redis, close_redis, redis_available
 import app.config as config_module
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
 from app.sse import sse_broadcaster
@@ -55,8 +56,9 @@ async def lifespan(app: FastAPI):
     reset_task = None
     try:
         await init_db()
+        await init_redis()
         await init_state_from_db()
-        print("[INIT] Database connected and state loaded")
+        print("[INIT] Database and Redis connected; state loaded")
 
         async def _auto_reset_loop():
             while True:
@@ -75,6 +77,7 @@ async def lifespan(app: FastAPI):
             reset_task.cancel()
             await asyncio.gather(reset_task, return_exceptions=True)
         await proxy.close_http_clients()
+        await close_redis()
         await close_db()
         print("[INIT] Database connection closed")
 
@@ -86,7 +89,9 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 @app.get("/health", include_in_schema=False)
 async def health_check():
     """Lightweight liveness endpoint for the container orchestrator."""
-    return {"status": "ok"}
+    if not await redis_available():
+        return JSONResponse(status_code=503, content={"status": "degraded", "redis": "unavailable"})
+    return {"status": "ok", "redis": "ok"}
 
 
 _INFERENCE_REQUEST_PATHS = {

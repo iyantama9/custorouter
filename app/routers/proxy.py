@@ -307,6 +307,26 @@ def _key_model_prompt(request: Request, model: str) -> str:
     return str(prompts.get(model) or "").strip()
 
 
+def _builtin_provider_for_model(model: str) -> str:
+    """Resolve a built-in provider once, for both API protocol routes.
+
+    Keeping this shared matters because Playground uses the Anthropic route,
+    while most external clients use the OpenAI route.  They must never route
+    the same prefixed model differently.
+    """
+    if model.startswith("bm/") or model in config_module.BLUESMINDS_MODELS:
+        return "bm"
+    if model.startswith("nry/") or model in config_module.NARA_MODELS:
+        return "nry"
+    if model.startswith("dh/") or model in config_module.DAHL_MODELS_SHORT:
+        return "dahl"
+    if model.startswith("qc/"):
+        return "qc"
+    if model.startswith("mk/") or model in config_module.MARKETKU_MODELS:
+        return "marketku"
+    return "bm"
+
+
 def _inject_anthropic_system(payload: dict, prompt: str):
     """Prepend a system prompt to an Anthropic-shaped payload in place."""
     if not prompt:
@@ -847,6 +867,19 @@ async def messages(request: Request):
             await _broadcast_request_log()
             return JSONResponse(status_code=status, content=body)
 
+    provider = _builtin_provider_for_model(requested_model_raw)
+    if provider in config_module.DISABLED_PROVIDERS:
+        return JSONResponse(status_code=503, content={"error": {"message": f"Provider '{provider}' has been removed."}})
+
+    provider_prefixes = {
+        "bm": "bm/", "nry": "nry/", "dahl": "dh/",
+        "qc": "qc/", "marketku": "mk/",
+    }
+    prefix = provider_prefixes.get(provider)
+    upstream_model = requested_model_raw[len(prefix):] if prefix and requested_model_raw.startswith(prefix) else requested_model_raw
+    if provider == "dahl":
+        upstream_model = resolve_dahl_model(upstream_model)
+    payload["model"] = upstream_model
 
     if provider == "bm":
         current_key = get_current_bm_key() if BM_API_KEYS else BLUESMINDS_API_KEY or ""
@@ -1663,18 +1696,7 @@ async def chat_completions(request: Request):
 
             return StreamingResponse(_relay_openai_stream(), media_type="text/event-stream")
 
-    provider = "bm"
-
-    if requested_model.startswith("bm/") or requested_model in config_module.BLUESMINDS_MODELS:
-        provider = "bm"
-    elif requested_model.startswith("nry/") or requested_model in config_module.NARA_MODELS:
-        provider = "nry"
-    elif requested_model.startswith("dh/") or requested_model in config_module.DAHL_MODELS_SHORT:
-        provider = "dahl"
-    elif requested_model.startswith("qc/"):
-        provider = "qc"
-    elif requested_model.startswith("mk/") or requested_model in config_module.MARKETKU_MODELS:
-        provider = "marketku"
+    provider = _builtin_provider_for_model(requested_model)
 
     if provider in config_module.DISABLED_PROVIDERS:
         return JSONResponse(status_code=503, content={"error": {"message": f"Provider '{provider}' has been removed."}})
@@ -1859,4 +1881,3 @@ async def chat_completions(request: Request):
             return JSONResponse(status_code=500, content=last_content)
 
     return JSONResponse(status_code=last_status, content=last_content)
-

@@ -18,6 +18,19 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7.4.2-alpine
+    container_name: llm-router-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   app:
     build: .
     container_name: llm-router-app
@@ -26,6 +39,7 @@ services:
       - "127.0.0.1:4000:4000"  # host nginx is the only public entrypoint
     environment:
       - DATABASE_URL=postgresql://llm_router_user:${POSTGRES_PASSWORD}@postgres:5432/llm_router
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       # Must match the port uvicorn actually binds (see Dockerfile CMD). Playground
       # calls http://127.0.0.1:$PORT/v1/messages internally, so a mismatch here
       # breaks the Playground with "All connection attempts failed".
@@ -34,6 +48,8 @@ services:
       - .env
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./app:/app/app
@@ -60,6 +76,8 @@ volumes:
   postgres_data:
     driver: local
   copilot_api_data:
+    driver: local
+  redis_data:
     driver: local
 
 networks:
