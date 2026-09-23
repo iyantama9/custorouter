@@ -1059,6 +1059,13 @@ class MobileDashboardPerformanceTests(unittest.TestCase):
         self.assertIn("backdrop-filter: none !important", self.base)
         self.assertIn("document.querySelector('[x-data=\"dashboard()\"]')", self.base)
 
+    def test_wide_dashboard_tables_are_contained_on_mobile(self):
+        self.assertIn(".dashboard-shell { overflow-x: hidden; }", self.dashboard)
+        self.assertIn(".dashboard-table-scroll", self.dashboard)
+        self.assertIn("overscroll-behavior-x: contain", self.dashboard)
+        self.assertIn("sm:flex-row", self.dashboard)
+        self.assertIn("dashboard-table--providers", self.dashboard)
+
     def test_live_updates_are_coalesced(self):
         self.assertIn("queueStatus(data.payload)", self.dashboard)
         self.assertIn("queueLiveLog(data.payload)", self.dashboard)
