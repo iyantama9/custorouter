@@ -18,6 +18,8 @@ from redis.exceptions import RedisError
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "llm-router")
+LIVE_LOG_LIMIT = max(25, int(os.getenv("REDIS_LIVE_LOG_LIMIT", "250")))
+LIVE_LOG_TTL_SECONDS = max(60, int(os.getenv("REDIS_LIVE_LOG_TTL_SECONDS", "86400")))
 
 _client: redis.Redis | None = None
 
@@ -120,6 +122,63 @@ async def get_cached_json(name: str) -> Any | None:
 
 async def set_cached_json(name: str, value: Any, ttl_seconds: int) -> None:
     await _redis().set(_key(f"cache:{name}"), json.dumps(value, separators=(",", ":")), ex=ttl_seconds)
+
+
+async def cache_live_log(log_item: dict[str, Any]) -> None:
+    """Keep a bounded, short-lived copy of the dashboard's newest logs.
+
+    PostgreSQL remains the durable source for search and historical pages. This
+    list only removes a hot-path query when an operator opens the default
+    newest-first Activity page, and is deliberately capped/expired so Redis
+    cannot turn request logging into unbounded memory growth.
+    """
+    encoded = json.dumps(log_item, separators=(",", ":"))
+    key = _key("dashboard:live-logs")
+    pipe = _redis().pipeline(transaction=True)
+    pipe.lpush(key, encoded)
+    pipe.ltrim(key, 0, LIVE_LOG_LIMIT - 1)
+    pipe.expire(key, LIVE_LOG_TTL_SECONDS)
+    await pipe.execute()
+
+
+async def get_live_logs(limit: int) -> list[dict[str, Any]]:
+    """Return the recent dashboard log ring-buffer, newest first."""
+    if limit < 1:
+        return []
+    raw_items = await _redis().lrange(_key("dashboard:live-logs"), 0, limit - 1)
+    result: list[dict[str, Any]] = []
+    for raw in raw_items:
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            result.append(item)
+    return result
+
+
+async def publish_dashboard_event(event_type: str, payload: dict[str, Any], origin: str) -> None:
+    """Publish a dashboard-only event to sibling router processes.
+
+    The origin marker lets the publishing process fan out locally immediately
+    without sending every browser duplicate SSE events when it receives its
+    own Redis Pub/Sub message back.
+    """
+    envelope = {
+        "origin": origin,
+        "event": {"type": event_type, "payload": payload},
+    }
+    await _redis().publish(
+        _key("dashboard:events"),
+        json.dumps(envelope, separators=(",", ":")),
+    )
+
+
+async def open_dashboard_event_subscription():
+    """Create an independent Pub/Sub connection for SSE fan-out."""
+    pubsub = _redis().pubsub(ignore_subscribe_messages=True)
+    await pubsub.subscribe(_key("dashboard:events"))
+    return pubsub
 
 
 async def redis_available() -> bool:

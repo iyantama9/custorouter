@@ -28,6 +28,7 @@ from app.redis_store import (
     consume_login_attempt,
     create_session,
     get_cached_json,
+    get_live_logs,
     revoke_session,
     set_cached_json,
     validate_session,
@@ -231,6 +232,32 @@ async def api_logs(
     sort_by: str = Query("created_at"),
     sort_order: str = Query("DESC")
 ):
+    # The ordinary Activity view is a newest-first first page with no search.
+    # It is read repeatedly by dashboard opens/reconnects, so serve it from
+    # Redis once its bounded live-log ring is warm. PostgreSQL still owns every
+    # filtered, sorted, or historical page.
+    default_live_view = (
+        page == 1 and not search and sort_by == "created_at"
+        and sort_order.upper() == "DESC"
+    )
+    if default_live_view:
+        try:
+            live_logs = await get_live_logs(per_page)
+            # Avoid a partial/cold cache replacing a full first page after a
+            # restart. Once warm, this removes both COUNT and SELECT queries.
+            if len(live_logs) >= per_page or (
+                config_module.total_requests <= len(live_logs)
+            ):
+                total = config_module.total_requests
+                return {
+                    "logs": live_logs,
+                    "total": total,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_pages": max(1, (total + per_page - 1) // per_page),
+                }
+        except (RedisError, RuntimeError):
+            pass
     # A dashboard can issue the same query from polling and a live-event
     # refresh at nearly the same time. A tiny shared cache removes duplicate
     # PostgreSQL scans without making the activity view materially stale.

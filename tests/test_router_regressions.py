@@ -265,6 +265,37 @@ class SSEBackpressureTests(unittest.IsolatedAsyncioTestCase):
             newest = await queue.get()
         self.assertIn('"value": 149', newest)
 
+    async def test_local_fanout_is_immediate_without_waiting_for_redis(self):
+        broadcaster = SSEBroadcaster()
+        queue = broadcaster.connect()
+
+        await broadcaster.broadcast("log", {"id": "live-1"})
+
+        self.assertIn('"id": "live-1"', await queue.get())
+
+
+class LiveLogRedisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_activity_page_uses_warm_redis_ring(self):
+        original_total = config.total_requests
+        config.total_requests = 42
+        live_logs = [{"id": f"live-{idx}", "model": "wz/example"} for idx in range(15)]
+        try:
+            with (
+                patch.object(admin, "get_live_logs", AsyncMock(return_value=live_logs)),
+                patch.object(admin, "get_paginated_logs", AsyncMock()) as database_logs,
+            ):
+                result = await admin.api_logs(
+                    user=None, page=1, per_page=15, search="",
+                    sort_by="created_at", sort_order="DESC",
+                )
+        finally:
+            config.total_requests = original_total
+
+        self.assertEqual(result["logs"], live_logs)
+        self.assertEqual(result["total"], 42)
+        self.assertEqual(result["total_pages"], 3)
+        database_logs.assert_not_awaited()
+
 
 class AnthropicStreamTranslationTests(unittest.IsolatedAsyncioTestCase):
     async def test_accepts_openai_chunks_with_null_usage(self):

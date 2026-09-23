@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         await init_redis()
+        await sse_broadcaster.start()
         await init_state_from_db()
         print("[INIT] Database and Redis connected; state loaded")
 
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
             reset_task.cancel()
             await asyncio.gather(reset_task, return_exceptions=True)
         await proxy.close_http_clients()
+        await sse_broadcaster.stop()
         await close_redis()
         await close_db()
         print("[INIT] Database connection closed")
