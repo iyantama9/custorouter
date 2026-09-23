@@ -205,6 +205,34 @@ class PlaygroundPrivacyAndRoutingTests(unittest.TestCase):
         self.assertEqual(stripper.feed("nking>secret</think> final", final=True), " final")
 
 
+class QwenCredentialRotationTests(unittest.TestCase):
+    def setUp(self):
+        self.original_keys = config.QC_API_KEYS[:]
+        self.original_statuses = config.key_statuses.copy()
+        self.original_indexes = config.qc_model_key_index.copy()
+        config.QC_API_KEYS[:] = ["invalid-key", "valid-key"]
+        config.key_statuses.clear()
+        config.key_statuses.update({"invalid-key": "Active", "valid-key": "Standby"})
+        config.qc_model_key_index.clear()
+
+    def tearDown(self):
+        config.QC_API_KEYS[:] = self.original_keys
+        config.key_statuses.clear()
+        config.key_statuses.update(self.original_statuses)
+        config.qc_model_key_index.clear()
+        config.qc_model_key_index.update(self.original_indexes)
+
+    def test_invalid_qwen_key_is_skipped_for_future_requests(self):
+        body = {"error": {"code": "invalid_api_key", "message": "Incorrect API key"}}
+        def discard(coro):
+            coro.close()
+
+        with patch.object(config, "_bg", side_effect=discard):
+            self.assertTrue(proxy._rotate_qc_after_failure("qwen-turbo", "invalid-key", 403, body))
+        self.assertEqual(config.key_statuses["invalid-key"], "Invalid")
+        self.assertEqual(config.get_current_qc_key_for_model("qwen-turbo"), "valid-key")
+
+
 class DatabaseHotPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_router_key_verification_uses_one_round_trip(self):
         row = {

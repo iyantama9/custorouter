@@ -512,7 +512,7 @@ def get_current_qc_key_for_model(model: str) -> str:
     for offset in range(len(QC_API_KEYS)):
         idx = (start_idx + offset) % len(QC_API_KEYS)
         candidate = QC_API_KEYS[idx]
-        if not is_qc_model_exhausted(candidate, model):
+        if key_statuses.get(candidate) != "Invalid" and not is_qc_model_exhausted(candidate, model):
             qc_model_key_index[model] = idx
             return candidate
     return ""
@@ -535,7 +535,7 @@ def rotate_qc_key_for_model(model: str, after_key: str | None = None) -> bool:
     for offset in range(1, len(QC_API_KEYS) + 1):
         idx = (start_idx + offset) % len(QC_API_KEYS)
         candidate = QC_API_KEYS[idx]
-        if not is_qc_model_exhausted(candidate, model):
+        if key_statuses.get(candidate) != "Invalid" and not is_qc_model_exhausted(candidate, model):
             qc_model_key_index[model] = idx
             failover_count += 1
             print(f"[LOG] Rotated qc key for model {model} -> index {idx}: {candidate[:15]}...")
@@ -562,6 +562,20 @@ def mark_qc_model_exhausted(key: str, model: str):
         key,
         model,
     ))
+
+
+def mark_qc_key_invalid(key: str):
+    """Quarantine a DashScope credential explicitly rejected by upstream.
+
+    This differs from a per-model quota: an ``invalid_api_key`` response can
+    never succeed on another model, so retrying it for every Playground chat
+    only adds latency and needless provider traffic. Admin reset/add-key flows
+    can make it eligible again after the credential is corrected.
+    """
+    if key not in QC_API_KEYS:
+        return
+    key_statuses[key] = "Invalid"
+    _bg(db_execute("UPDATE api_keys SET status = 'Invalid' WHERE key_value = $1", key))
 
 
 def is_qc_model_exhausted(key: str, model: str) -> bool:

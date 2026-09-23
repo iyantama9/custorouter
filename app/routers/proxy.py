@@ -78,7 +78,23 @@ def _is_qc_model_quota_error(status_code: int, body) -> bool:
     return any(term in detail for term in quota_terms)
 
 
+def _is_qc_invalid_key_error(status_code: int, body) -> bool:
+    """Recognise a permanent DashScope credential rejection, not a quota."""
+    if status_code not in (401, 403):
+        return False
+    try:
+        detail = json.dumps(body, ensure_ascii=False).lower()
+    except Exception:
+        detail = str(body).lower()
+    return any(term in detail for term in (
+        "invalid_api_key", "invalid api key", "incorrect api key",
+        "api key is invalid", "apikey-error",
+    ))
+
+
 def _rotate_qc_after_failure(model: str, key: str, status_code: int, body) -> bool:
+    if _is_qc_invalid_key_error(status_code, body):
+        config_module.mark_qc_key_invalid(key)
     if _is_qc_model_quota_error(status_code, body):
         mark_qc_model_exhausted(key, model)
     return rotate_qc_key_for_model(model, after_key=key)
