@@ -1,5 +1,6 @@
 import json
 import hmac
+import hashlib
 import logging
 import os
 import time
@@ -28,6 +29,8 @@ from app.translator_openai import (
     openai_tools_to_anthropic, openai_tool_choice_to_anthropic,
 )
 from app.sse import sse_broadcaster
+from app.redis_store import get_cached_json, set_cached_json
+from redis.exceptions import RedisError
 
 
 logger = logging.getLogger(__name__)
@@ -722,6 +725,35 @@ async def list_models(request: Request):
     if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": {"message": "Invalid router password."}})
 
+    # Model discovery is commonly repeated by SDKs and editor clients. Keep a
+    # short, access-scoped Redis cache: the fingerprint includes full catalog
+    # contents, disabled providers, allowlist, and aliases, so a permission or
+    # model change naturally selects a new cache entry without exposing one
+    # key's view to another.
+    key_row = _router_key(request)
+    allowed_raw = (key_row.get("allowed_models") or "").strip() if key_row else ""
+    aliases = _key_aliases(request)
+    catalog_fingerprint = {
+        "builtin": {
+            "bm": config_module.BLUESMINDS_MODELS,
+            "nry": config_module.NARA_MODELS,
+            "dahl": config_module.DAHL_MODELS,
+            "qc": config_module.QWEN_CLOUD_MODELS,
+            "marketku": config_module.MARKETKU_MODELS,
+        },
+        "custom": {prefix: info.get("models") or [] for prefix, info in config_module.CUSTOM_PROVIDERS.items()},
+        "disabled": sorted(config_module.DISABLED_PROVIDERS),
+        "allowed": allowed_raw,
+        "aliases": aliases,
+    }
+    cache_id = hashlib.sha256(json.dumps(catalog_fingerprint, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    try:
+        cached = await get_cached_json(f"models:v1:{cache_id}")
+        if cached is not None:
+            return JSONResponse(content=cached)
+    except (RedisError, RuntimeError):
+        pass
+
     models = []
     disabled = config_module.DISABLED_PROVIDERS
     if "bm" not in disabled:
@@ -745,13 +777,10 @@ async def list_models(request: Request):
 
     # A key with a model allowlist should only see what it can actually call,
     # and aliased models are advertised under their new name.
-    key_row = _router_key(request)
     if key_row:
-        allowed_raw = (key_row.get("allowed_models") or "").strip()
         if allowed_raw:
             allowed = {m.strip() for m in allowed_raw.split(",") if m.strip()}
             models = [m for m in models if m in allowed]
-        aliases = _key_aliases(request)
         if aliases:
             models = [aliases.get(m, m) for m in models]
 
@@ -764,7 +793,12 @@ async def list_models(request: Request):
             "owned_by": "iyan-router"
         })
 
-    return JSONResponse(content={"object": "list", "data": data})
+    result = {"object": "list", "data": data}
+    try:
+        await set_cached_json(f"models:v1:{cache_id}", result, 30)
+    except (RedisError, RuntimeError):
+        pass
+    return JSONResponse(content=result)
 
 
 @router.post("/v1/messages/count_tokens")
