@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import httpx
 from starlette.requests import Request
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from app import database
 from app import config
@@ -295,6 +295,118 @@ class LiveLogRedisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["total"], 42)
         self.assertEqual(result["total_pages"], 3)
         database_logs.assert_not_awaited()
+
+
+class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
+    def _request_with_key(self, routes, allowed="wz/first,wz/second", body=None):
+        if body is None:
+            request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
+        else:
+            encoded = json.dumps(body).encode()
+            delivered = False
+
+            async def receive():
+                nonlocal delivered
+                if delivered:
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                delivered = True
+                return {"type": "http.request", "body": encoded, "more_body": False}
+
+            request = Request(
+                {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []},
+                receive,
+            )
+        request.state.router_key = {
+            "id": 1,
+            "allowed_models": allowed,
+            "model_routes": json.dumps(routes),
+        }
+        return request
+
+    async def test_route_retries_candidates_and_keeps_public_route_name(self):
+        request = self._request_with_key({"auto": ["wz/first", "wz/second"]})
+        seen = []
+
+        async def endpoint(candidate_request):
+            body = await candidate_request.json()
+            seen.append((body["model"], candidate_request.state.model_route_active))
+            return JSONResponse(status_code=503 if body["model"] == "wz/first" else 200, content={})
+
+        response = await proxy._run_model_route(
+            endpoint, request, {"model": "auto", "messages": []},
+            "auto", ["wz/first", "wz/second"],
+        )
+
+        self.assertEqual(seen, [("wz/first", True), ("wz/second", True)])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-router-model-route"], "auto")
+        self.assertEqual(response.headers["x-router-model-selected"], "wz/second")
+        self.assertEqual(response.headers["x-router-model-attempt"], "2")
+
+    def test_route_is_allowed_but_its_candidates_remain_allowlisted(self):
+        request = self._request_with_key({"auto": ["wz/first", "wz/second"]})
+        self.assertIsNone(proxy._model_allowed_for_key(request, "auto"))
+        self.assertIsNone(proxy._model_allowed_for_key(request, "wz/first"))
+        self.assertIn("not allowed", proxy._model_allowed_for_key(request, "wz/other"))
+
+    def test_route_settings_reject_route_targets_and_unallowed_models(self):
+        with self.assertRaises(admin._KeySettingsError):
+            admin._parse_key_settings({
+                "allowed_models": ["wz/first"],
+                "model_routes": {"auto": ["fallback"]},
+            })
+        with self.assertRaises(admin._KeySettingsError):
+            admin._parse_key_settings({
+                "model_routes": {"auto": ["backup"], "backup": ["wz/first"]},
+            })
+
+    async def test_openai_endpoint_retries_route_and_echoes_auto(self):
+        body = {"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}
+        request = self._request_with_key(
+            {"auto": ["test/first", "test/second"]},
+            allowed="test/first,test/second", body=body,
+        )
+        attempts = [
+            ("json", 503, {"error": {"message": "first unavailable"}}, "key-1"),
+            ("json", 200, {"model": "second", "choices": [], "usage": {}}, "key-2"),
+        ]
+        with (
+            patch.dict(config.CUSTOM_PROVIDERS, {"test": {"api_format": "openai"}}),
+            patch.object(proxy, "_dispatch_custom_openai", AsyncMock(side_effect=attempts)) as dispatch,
+            patch.object(proxy, "add_request_log"),
+            patch.object(proxy, "_bill_router_key", AsyncMock()),
+            patch.object(proxy, "_broadcast_request_log", AsyncMock()),
+        ):
+            response = await proxy.chat_completions(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["model"], "auto")
+        self.assertEqual([call.args[1]["model"] for call in dispatch.await_args_list], ["first", "second"])
+        self.assertEqual(response.headers["x-router-model-selected"], "test/second")
+
+    async def test_anthropic_endpoint_retries_route_and_echoes_auto(self):
+        body = {"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}
+        request = self._request_with_key(
+            {"auto": ["test/first", "test/second"]},
+            allowed="test/first,test/second", body=body,
+        )
+        attempts = [
+            ("json", 503, {"error": {"message": "first unavailable"}}),
+            ("json", 200, {"model": "second", "content": [], "usage": {}}),
+        ]
+        with (
+            patch.dict(config.CUSTOM_PROVIDERS, {"test": {"api_format": "anthropic"}}),
+            patch.object(proxy, "_dispatch_custom_provider", AsyncMock(side_effect=attempts)) as dispatch,
+            patch.object(proxy, "add_request_log"),
+            patch.object(proxy, "_bill_router_key", AsyncMock()),
+            patch.object(proxy, "_broadcast_request_log", AsyncMock()),
+        ):
+            response = await proxy.messages(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["model"], "auto")
+        self.assertEqual([call.args[1]["model"] for call in dispatch.await_args_list], ["first", "second"])
+        self.assertEqual(response.headers["x-router-model-selected"], "test/second")
 
 
 class AnthropicStreamTranslationTests(unittest.IsolatedAsyncioTestCase):

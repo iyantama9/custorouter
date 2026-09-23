@@ -1216,6 +1216,35 @@
           <p class="text-[10px] text-muted-foreground/70">Leave empty to allow every model.</p>
         </div>
 
+        <!-- Per-key synthetic model routes. A route is resolved only for this
+             Router API Key; it never changes the public/global catalog. -->
+        <div class="space-y-2 border border-border rounded-xl p-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <label class="text-[10px] font-600 text-muted-foreground uppercase tracking-[0.1em] font-mono">Model Routing</label>
+              <p class="text-[10px] text-muted-foreground/70 mt-1">Create <span class="font-mono">auto</span> (or another name) with ordered fallback models for this key.</p>
+            </div>
+            <button type="button" @click="addModelRoute()"
+                    class="shrink-0 px-2.5 py-1.5 rounded-lg border border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">Add route</button>
+          </div>
+          <template x-for="(route, index) in routerKeys.modelRoutes" :key="route.id">
+            <div class="bg-secondary/40 border border-border rounded-xl p-2.5 space-y-2">
+              <div class="flex items-center gap-2">
+                <input x-model="route.name" type="text" maxlength="100" placeholder="auto"
+                       class="w-28 bg-secondary border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40 text-foreground placeholder:text-muted-foreground/50">
+                <span class="text-xs text-muted-foreground">→</span>
+                <input x-model="route.targets" type="text" placeholder="wz/model-a, qc/model-b, nn/model-c"
+                       class="min-w-0 flex-1 bg-secondary border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40 text-foreground placeholder:text-muted-foreground/50">
+                <button type="button" @click="routerKeys.modelRoutes.splice(index, 1)"
+                        class="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors" aria-label="Remove route">
+                  <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+              <p class="text-[10px] text-muted-foreground/60">Comma-separated, tried left to right. Maximum 8 models; after a stream starts it is not replayed.</p>
+            </div>
+          </template>
+        </div>
+
         <!-- Per-model rename + system prompt, only for the models this key allows -->
         <div x-show="routerKeys.selectedModels.length" class="space-y-2">
           <div class="flex items-center justify-between gap-2">
@@ -1396,6 +1425,7 @@ function dashboard() {
       selectedModels: [],
       modelPrompts: {},
       modelAliases: {},
+      modelRoutes: [],
       editingId: null,
       resetUsage: false,
       usedTokens: 0,
@@ -1962,6 +1992,33 @@ function dashboard() {
       return Object.keys(this.activeModelAliases()).length;
     },
 
+    parseModelRoutes(raw) {
+      const routes = this.parseKeyJson(raw);
+      return Object.entries(routes)
+        .filter(([, targets]) => Array.isArray(targets))
+        .map(([name, targets], index) => ({
+          id: `route-${index}-${name}`,
+          name,
+          targets: targets.filter(m => typeof m === 'string').join(', ')
+        }));
+    },
+
+    addModelRoute() {
+      const index = this.routerKeys.modelRoutes.length;
+      this.routerKeys.modelRoutes.push({ id: `route-new-${Date.now()}-${index}`, name: 'auto', targets: '' });
+      this.$nextTick(() => window.refreshLucideIcons());
+    },
+
+    activeModelRoutes() {
+      const routes = {};
+      for (const route of this.routerKeys.modelRoutes) {
+        const name = (route.name || '').trim();
+        const targets = (route.targets || '').split(',').map(m => m.trim()).filter(Boolean);
+        if (name) routes[name] = targets;
+      }
+      return routes;
+    },
+
     // Doubles as the edit form: pass an existing key row to prefill it.
     async openKeyForm(row) {
       const rk = this.routerKeys;
@@ -1983,6 +2040,7 @@ function dashboard() {
         rk.selectedModels = (row.allowed_models || '').split(',').map(m => m.trim()).filter(Boolean);
         rk.modelPrompts = this.parseKeyJson(row.model_prompts);
         rk.modelAliases = this.parseKeyJson(row.model_aliases);
+        rk.modelRoutes = this.parseModelRoutes(row.model_routes);
         // The picker needs the model catalogue to render the current selection.
         if (!this.models.loaded) this.fetchModels();
       } else {
@@ -1993,6 +2051,7 @@ function dashboard() {
         rk.selectedModels = [];
         rk.modelPrompts = {};
         rk.modelAliases = {};
+        rk.modelRoutes = [];
       }
       rk.formOpen = true;
       this.$nextTick(() => window.refreshLucideIcons());
@@ -2070,6 +2129,7 @@ function dashboard() {
             allowed_models: rk.selectedModels,
             model_prompts: this.activeModelPrompts(),
             model_aliases: this.activeModelAliases(),
+            model_routes: this.activeModelRoutes(),
           })
         });
         // The API explains *why* it refused (prompt too long, prompt for a
@@ -2101,6 +2161,7 @@ function dashboard() {
         rk.selectedModels = [];
         rk.modelPrompts = {};
         rk.modelAliases = {};
+        rk.modelRoutes = [];
         rk.resetUsage = false;
         this.$nextTick(() => window.refreshLucideIcons());
       } catch (e) {

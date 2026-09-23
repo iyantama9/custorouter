@@ -3,6 +3,7 @@ import ipaddress
 import os
 import secrets
 import time
+import re
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, Request, Body, Cookie, Depends, Query, HTTPException
@@ -797,6 +798,11 @@ class _KeySettingsError(Exception):
     """Raised when a key's settings don't validate; message goes to the client."""
 
 
+_MODEL_ROUTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
+_MAX_MODEL_ROUTES = 20
+_MAX_ROUTE_CANDIDATES = 8
+
+
 def _parse_key_settings(payload: dict):
     """
     Validate the tunable parts of a router key. Shared by create and update so
@@ -862,6 +868,51 @@ def _parse_key_settings(payload: dict):
         seen.add(alias)
         aliases[model] = alias
 
+    # Per-key failover chains. A synthetic route name (usually "auto") maps
+    # to actual model ids; routes cannot point to routes, which makes loops
+    # impossible and caps a client request to a small, predictable number of
+    # upstream attempts.
+    routes_in = payload.get("model_routes") or {}
+    if not isinstance(routes_in, dict):
+        raise _KeySettingsError("model_routes must be an object")
+    if len(routes_in) > _MAX_MODEL_ROUTES:
+        raise _KeySettingsError(f"At most {_MAX_MODEL_ROUTES} model routes are allowed")
+    routes = {}
+    for route_name, candidates_in in routes_in.items():
+        route_name = str(route_name or "").strip()
+        if not _MODEL_ROUTE_NAME.fullmatch(route_name):
+            raise _KeySettingsError(
+                "Route names must be 1-100 characters: letters, numbers, ., _, :, /, or -"
+            )
+        if route_name in aliases_in or route_name in seen:
+            raise _KeySettingsError(f"'{route_name}' conflicts with a model rename")
+        if route_name in allowed:
+            raise _KeySettingsError(f"'{route_name}' is already a real allowed model")
+        if not isinstance(candidates_in, list):
+            raise _KeySettingsError(f"Route '{route_name}' must contain a list of models")
+        candidates = []
+        for candidate in candidates_in:
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                continue
+            if len(candidate) > 200:
+                raise _KeySettingsError(f"Model in route '{route_name}' is too long")
+            if candidate == route_name or candidate in routes_in:
+                raise _KeySettingsError(f"Route '{route_name}' cannot target another route")
+            if allowed and candidate not in allowed:
+                raise _KeySettingsError(
+                    f"'{candidate}' in route '{route_name}' isn't in this key's allowed models"
+                )
+            if candidate not in candidates:
+                candidates.append(candidate)
+        if not candidates:
+            raise _KeySettingsError(f"Route '{route_name}' needs at least one model")
+        if len(candidates) > _MAX_ROUTE_CANDIDATES:
+            raise _KeySettingsError(
+                f"Route '{route_name}' can have at most {_MAX_ROUTE_CANDIDATES} candidates"
+            )
+        routes[route_name] = candidates
+
     return {
         "expires_at": expires_at,
         "expires_in_days": expires_in_days,
@@ -869,6 +920,7 @@ def _parse_key_settings(payload: dict):
         "allowed_models": ",".join(allowed),
         "model_prompts": json.dumps(prompts),
         "model_aliases": json.dumps(aliases),
+        "model_routes": json.dumps(routes),
     }
 
 
@@ -885,7 +937,7 @@ async def api_create_router_key(payload: dict = Body(...), user: None = Depends(
 
     key = await create_router_api_key(
         key_name, s["expires_at"], s["token_quota"],
-        s["allowed_models"], s["model_prompts"], s["model_aliases"],
+        s["allowed_models"], s["model_prompts"], s["model_aliases"], s["model_routes"],
     )
     return {"success": True, "key": _json_safe_row(key)}
 
@@ -910,7 +962,7 @@ async def api_update_router_key(key_id: int, payload: dict = Body(...), user: No
     keep_expiry = payload.get("keep_expiry") is True
     updated = await update_router_api_key(
         key_id, key_name, s["expires_at"], s["token_quota"],
-        s["allowed_models"], s["model_prompts"], s["model_aliases"],
+        s["allowed_models"], s["model_prompts"], s["model_aliases"], s["model_routes"],
         keep_expiry=keep_expiry,
     )
     if not updated:

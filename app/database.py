@@ -264,6 +264,9 @@ async def setup_tables():
     # in /v1/models and in responses, and lets requests address it by the new
     # name -- again only for this key.
     await execute("ALTER TABLE router_api_keys ADD COLUMN IF NOT EXISTS model_aliases TEXT NOT NULL DEFAULT '{}'")
+    # JSON object of {route_name: [candidate_model, ...]}. A route belongs to
+    # one Router API Key, never to the global catalog.
+    await execute("ALTER TABLE router_api_keys ADD COLUMN IF NOT EXISTS model_routes TEXT NOT NULL DEFAULT '{}'")
 
     # ── Custom (admin-added) providers ──
     await execute("""
@@ -335,14 +338,17 @@ async def save_chat_message(session_id: int, role: str, content: str):
     return await fetchrow("INSERT INTO chat_messages (session_id, role, content) VALUES ($1, $2, $3) RETURNING *", session_id, role, content)
 
 # ── Router API Key Helpers ──
-async def create_router_api_key(key_name: str, expires_at=None, token_quota: int = 0, allowed_models: str = "", model_prompts: str = "{}", model_aliases: str = "{}"):
+async def create_router_api_key(key_name: str, expires_at=None, token_quota: int = 0,
+                                allowed_models: str = "", model_prompts: str = "{}",
+                                model_aliases: str = "{}", model_routes: str = "{}"):
     """Generate a new router API key, optionally scoped by expiry/quota/models."""
     import secrets
     key_value = f"rtr_{secrets.token_urlsafe(32)}"
     return await fetchrow(
-        """INSERT INTO router_api_keys (key_value, key_name, expires_at, token_quota, allowed_models, model_prompts, model_aliases)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *""",
-        key_value, key_name, expires_at, token_quota, allowed_models, model_prompts, model_aliases
+        """INSERT INTO router_api_keys
+               (key_value, key_name, expires_at, token_quota, allowed_models, model_prompts, model_aliases, model_routes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *""",
+        key_value, key_name, expires_at, token_quota, allowed_models, model_prompts, model_aliases, model_routes
     )
 
 async def get_router_api_keys():
@@ -355,7 +361,7 @@ async def get_router_api_keys():
     """
     return await fetch(
         """SELECT id, key_name, key_value, created_at, last_used_at, is_active,
-                  expires_at, token_quota, tokens_used, allowed_models, model_prompts, model_aliases
+                  expires_at, token_quota, tokens_used, allowed_models, model_prompts, model_aliases, model_routes
            FROM router_api_keys ORDER BY created_at DESC"""
     )
 
@@ -374,7 +380,7 @@ async def verify_router_api_key(key_value: str):
              AND (expires_at IS NULL OR expires_at > NOW())
              AND (token_quota = 0 OR tokens_used < token_quota)
            RETURNING id, token_quota, tokens_used, allowed_models,
-                     model_prompts, model_aliases, expires_at""",
+                     model_prompts, model_aliases, model_routes, expires_at""",
         key_value
     )
     if not key:
@@ -382,7 +388,7 @@ async def verify_router_api_key(key_value: str):
     return dict(key)
 
 async def update_router_api_key(key_id: int, key_name: str, expires_at, token_quota: int,
-                                allowed_models: str, model_prompts: str, model_aliases: str,
+                                allowed_models: str, model_prompts: str, model_aliases: str, model_routes: str,
                                 keep_expiry: bool = False):
     """
     Update a key's settings in place. The secret is never touched, so anyone
@@ -392,16 +398,16 @@ async def update_router_api_key(key_id: int, key_name: str, expires_at, token_qu
         return await fetchrow(
             """UPDATE router_api_keys
                SET key_name = $2, token_quota = $3, allowed_models = $4,
-                   model_prompts = $5, model_aliases = $6
+                   model_prompts = $5, model_aliases = $6, model_routes = $7
                WHERE id = $1 RETURNING *""",
-            key_id, key_name, token_quota, allowed_models, model_prompts, model_aliases
+            key_id, key_name, token_quota, allowed_models, model_prompts, model_aliases, model_routes
         )
     return await fetchrow(
         """UPDATE router_api_keys
            SET key_name = $2, expires_at = $3, token_quota = $4, allowed_models = $5,
-               model_prompts = $6, model_aliases = $7
+               model_prompts = $6, model_aliases = $7, model_routes = $8
            WHERE id = $1 RETURNING *""",
-        key_id, key_name, expires_at, token_quota, allowed_models, model_prompts, model_aliases
+        key_id, key_name, expires_at, token_quota, allowed_models, model_prompts, model_aliases, model_routes
     )
 
 async def reset_router_key_usage(key_id: int):

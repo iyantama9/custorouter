@@ -189,6 +189,11 @@ async def _build_status_dict(include_details: bool = True):
 
 async def _check_router_auth(request: Request):
     """Check router authentication via password or API key."""
+    # Internal model-route attempts inherit the authenticated key from their
+    # outer request. They must not re-run a database UPDATE (or reset quota
+    # accounting) for each fallback candidate.
+    if getattr(request.state, "router_key", None) is not None:
+        return True
     auth_header = request.headers.get("Authorization")
     x_api_key = request.headers.get("x-api-key")
 
@@ -253,6 +258,33 @@ def _router_key(request: Request):
     return getattr(request.state, "router_key", None)
 
 
+def _key_model_routes(request: Request) -> dict[str, list[str]]:
+    """Return validated per-key synthetic model routes, if this is a key call."""
+    key_row = _router_key(request)
+    if not key_row:
+        return {}
+    raw = key_row.get("model_routes")
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    # Database input is validated by the admin API. Still validate types on
+    # read: a legacy/manual row must never make request routing unsafe.
+    routes: dict[str, list[str]] = {}
+    for name, candidates in decoded.items():
+        if not isinstance(name, str) or not isinstance(candidates, list):
+            continue
+        clean = [candidate.strip() for candidate in candidates
+                 if isinstance(candidate, str) and candidate.strip()]
+        if clean:
+            routes[name] = clean[:8]
+    return routes
+
+
 def _model_allowed_for_key(request: Request, model: str):
     """
     Enforce a router key's model allowlist. Returns None when allowed, or an
@@ -260,6 +292,10 @@ def _model_allowed_for_key(request: Request, model: str):
     """
     key_row = _router_key(request)
     if not key_row:
+        return None
+    # A route name is a model identifier exposed only to this key. Its
+    # candidate list was validated against the key allowlist when saved.
+    if model in _key_model_routes(request):
         return None
     raw = (key_row.get("allowed_models") or "").strip()
     if not raw:
@@ -304,6 +340,60 @@ def _resolve_alias(request: Request, requested: str):
         if alias == requested:
             return real, alias
     return requested, aliases.get(requested, requested)
+
+
+def _clone_request_for_model_route(request: Request, payload: dict,
+                                   display_model: str) -> Request:
+    """Create an internal request for one route candidate without self-HTTP."""
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        delivered = True
+        return {"type": "http.request", "body": encoded, "more_body": False}
+
+    scope = dict(request.scope)
+    # State is normally shared through scope. Copy it so the route marker is
+    # never visible to the outer request or a subsequent independent request.
+    scope["state"] = dict(request.scope.get("state") or {})
+    routed = Request(scope, receive)
+    key_row = _router_key(request)
+    if key_row is not None:
+        routed.state.router_key = key_row
+    routed.state.model_route_active = True
+    routed.state.model_route_display = display_model
+    return routed
+
+
+def _should_fallback_model_response(response) -> bool:
+    """A route may retry only failed pre-response attempts, never a stream."""
+    # Any non-2xx candidate is an error before a useful response was returned.
+    # Providers often use 4xx for a disabled model, quota, or exhausted credit.
+    return response.status_code >= 400
+
+
+async def _run_model_route(endpoint, request: Request, payload: dict,
+                           route_name: str, candidates: list[str]):
+    """Attempt the configured models in order and annotate the chosen result."""
+    last_response = None
+    for attempt, candidate in enumerate(candidates, start=1):
+        candidate_payload = dict(payload)
+        candidate_payload["model"] = candidate
+        routed_request = _clone_request_for_model_route(request, candidate_payload, route_name)
+        response = await endpoint(routed_request)
+        response.headers["X-Router-Model-Route"] = route_name
+        response.headers["X-Router-Model-Selected"] = candidate
+        response.headers["X-Router-Model-Attempt"] = str(attempt)
+        if not _should_fallback_model_response(response):
+            return response
+        last_response = response
+    return last_response or JSONResponse(
+        status_code=503,
+        content={"error": {"message": f"No candidate is configured for model route '{route_name}'."}},
+    )
 
 
 def _key_model_prompt(request: Request, model: str) -> str:
@@ -751,6 +841,7 @@ async def list_models(request: Request):
     key_row = _router_key(request)
     allowed_raw = (key_row.get("allowed_models") or "").strip() if key_row else ""
     aliases = _key_aliases(request)
+    model_routes = _key_model_routes(request)
     catalog_fingerprint = {
         "builtin": {
             "bm": config_module.BLUESMINDS_MODELS,
@@ -763,6 +854,7 @@ async def list_models(request: Request):
         "disabled": sorted(config_module.DISABLED_PROVIDERS),
         "allowed": allowed_raw,
         "aliases": aliases,
+        "model_routes": model_routes,
     }
     cache_id = hashlib.sha256(json.dumps(catalog_fingerprint, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if _model_catalog_cache_enabled:
@@ -803,6 +895,9 @@ async def list_models(request: Request):
             models = [m for m in models if m in allowed]
         if aliases:
             models = [aliases.get(m, m) for m in models]
+        # Synthetic route names such as "auto" are intentionally advertised
+        # only to the key that owns them.
+        models.extend(name for name in model_routes if name not in models)
 
     data = []
     for m in models:
@@ -854,11 +949,19 @@ async def messages(request: Request):
     # An aliased name has to become the real model before anything routes on
     # it; display_model is what the response will claim to be.
     requested_model_raw, display_model = _resolve_alias(request, payload.get("model", "") or "")
+    display_model = getattr(request.state, "model_route_display", display_model)
     payload["model"] = requested_model_raw
 
     denied = _model_allowed_for_key(request, requested_model_raw)
     if denied:
         return JSONResponse(status_code=403, content={"error": {"message": denied}})
+
+    if not getattr(request.state, "model_route_active", False):
+        candidates = _key_model_routes(request).get(requested_model_raw)
+        if candidates:
+            return await _run_model_route(
+                messages, request, payload, display_model, candidates,
+            )
 
     # Applied here, before provider dispatch, so it reaches built-in and
     # custom providers alike.
@@ -1600,6 +1703,7 @@ async def chat_completions(request: Request):
 
     payload = dict(openai_payload)
     requested_model, display_model = _resolve_alias(request, payload.get("model") or "bm/claude-3-5-sonnet-20241022")
+    display_model = getattr(request.state, "model_route_display", display_model)
     payload["model"] = requested_model
     if not isinstance(payload.get("messages"), list):
         return JSONResponse(status_code=400, content={"error": {"message": "messages must be an array."}})
@@ -1608,6 +1712,13 @@ async def chat_completions(request: Request):
     denied = _model_allowed_for_key(request, requested_model)
     if denied:
         return JSONResponse(status_code=403, content={"error": {"message": denied}})
+
+    if not getattr(request.state, "model_route_active", False):
+        candidates = _key_model_routes(request).get(requested_model)
+        if candidates:
+            return await _run_model_route(
+                chat_completions, request, payload, display_model, candidates,
+            )
 
     _inject_openai_system(payload, _key_model_prompt(request, requested_model))
 
