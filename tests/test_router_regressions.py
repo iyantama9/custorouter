@@ -1066,6 +1066,13 @@ class MobileDashboardPerformanceTests(unittest.TestCase):
         self.assertIn("sm:flex-row", self.dashboard)
         self.assertIn("dashboard-table--providers", self.dashboard)
 
+    def test_model_routes_use_catalog_picker_not_free_text_candidates(self):
+        self.assertIn("openRouteModelPicker(index)", self.dashboard)
+        self.assertIn("routePickerModels()", self.dashboard)
+        self.assertIn("toggleRouteModel(m.id)", self.dashboard)
+        self.assertIn("moveRouteTarget(index, targetIndex", self.dashboard)
+        self.assertNotIn('placeholder="wz/model-a, qc/model-b, nn/model-c"', self.dashboard)
+
     def test_live_updates_are_coalesced(self):
         self.assertIn("queueStatus(data.payload)", self.dashboard)
         self.assertIn("queueLiveLog(data.payload)", self.dashboard)

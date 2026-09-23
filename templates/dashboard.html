@@ -1266,14 +1266,27 @@
                 <input x-model="route.name" type="text" maxlength="100" placeholder="auto"
                        class="model-route-name w-28 bg-secondary border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40 text-foreground placeholder:text-muted-foreground/50">
                 <span class="text-xs text-muted-foreground shrink-0">→</span>
-                <input x-model="route.targets" type="text" placeholder="wz/model-a, qc/model-b, nn/model-c"
-                       class="model-route-targets min-w-0 flex-1 bg-secondary border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40 text-foreground placeholder:text-muted-foreground/50">
+                <button type="button" @click="openRouteModelPicker(index)"
+                        class="model-route-targets min-w-0 flex-1 rounded-lg border border-border bg-secondary px-2.5 py-1.5 text-left text-xs font-mono text-foreground hover:bg-secondary/80 focus:outline-none focus:ring-1 focus:ring-primary/40">
+                  <span class="block truncate" x-text="routeTargets(route).length ? `${routeTargets(route).length} model${routeTargets(route).length === 1 ? '' : 's'} selected` : 'Choose fallback models…'"></span>
+                </button>
                 <button type="button" @click="routerKeys.modelRoutes.splice(index, 1)"
                         class="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors" aria-label="Remove route">
                   <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                 </button>
               </div>
-              <p class="text-[10px] text-muted-foreground/60">Comma-separated, tried left to right. Maximum 8 models; after a stream starts it is not replayed.</p>
+              <div x-show="routeTargets(route).length" class="flex flex-wrap gap-1.5">
+                <template x-for="(target, targetIndex) in routeTargets(route)" :key="`${route.id}-${target}`">
+                  <span class="inline-flex max-w-full items-center gap-1 rounded-lg border border-border bg-card px-2 py-1 font-mono text-[10px] text-foreground">
+                    <span class="truncate" x-text="target"></span>
+                    <button type="button" @click="moveRouteTarget(index, targetIndex, -1)" :disabled="targetIndex === 0"
+                            class="text-muted-foreground hover:text-foreground disabled:opacity-25" aria-label="Move model earlier">↑</button>
+                    <button type="button" @click="moveRouteTarget(index, targetIndex, 1)" :disabled="targetIndex === routeTargets(route).length - 1"
+                            class="text-muted-foreground hover:text-foreground disabled:opacity-25" aria-label="Move model later">↓</button>
+                  </span>
+                </template>
+              </div>
+              <p class="text-[10px] text-muted-foreground/60">Pick from the catalog; first model is tried first. Use arrows to set the fallback order (max 8).</p>
             </div>
           </template>
         </div>
@@ -1317,6 +1330,56 @@
       </form>
     </div>
   </div>
+  <!-- Allowed-models picker for router API keys -->
+  <div x-show="routerKeys.routePickerOpen" x-transition.opacity
+       class="fixed inset-0 z-[96] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+       @keydown.escape.window="routerKeys.routePickerOpen = false">
+    <div class="absolute inset-0" @click="routerKeys.routePickerOpen = false"></div>
+    <div class="relative w-full max-w-2xl max-h-[82vh] bg-card border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+      <div class="px-5 py-4 border-b border-border flex items-center justify-between gap-4 shrink-0">
+        <div class="min-w-0">
+          <h3 class="font-display text-lg font-700 tracking-wide text-foreground">Fallback Models</h3>
+          <p class="truncate text-xs text-muted-foreground mt-0.5"
+             x-text="`${routePickerTargets().length} selected — first model is tried first`"></p>
+        </div>
+        <button @click="routerKeys.routePickerOpen = false"
+                class="p-2 rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors shrink-0">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="px-5 py-3 border-b border-border flex flex-col sm:flex-row gap-2 shrink-0">
+        <input x-model="routerKeys.routePickerSearch" type="text" placeholder="Search models…"
+               class="w-full min-w-0 flex-1 bg-secondary border border-border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40 text-foreground placeholder:text-muted-foreground/50">
+        <button type="button" @click="clearRouteTargets()" :disabled="!routePickerTargets().length"
+                class="px-3 py-2 rounded-xl text-[11px] font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors whitespace-nowrap disabled:opacity-40">Clear route</button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto min-h-0 divide-y divide-border/40">
+        <template x-if="!routePickerModels().length">
+          <div class="px-5 py-12 text-center text-sm text-muted-foreground">No models match that search</div>
+        </template>
+        <template x-for="m in routePickerModels()" :key="'route-pick-'+m.id">
+          <label class="flex items-center gap-3 px-5 py-2.5 hover:bg-secondary/25 transition-colors cursor-pointer">
+            <input type="checkbox" class="rounded border-border accent-primary shrink-0"
+                   :checked="routePickerTargets().includes(m.id)"
+                   @change="toggleRouteModel(m.id)">
+            <span class="w-5 h-5 rounded-lg flex items-center justify-center shrink-0 text-[9px] font-700 uppercase border"
+                  :class="providerAccent(m.providerId)" x-text="m.providerId.slice(0,2)"></span>
+            <span class="font-mono text-xs text-foreground truncate flex-1" x-text="m.id"></span>
+            <span class="text-[10px] text-muted-foreground shrink-0 hidden sm:inline" x-text="m.providerName"></span>
+          </label>
+        </template>
+      </div>
+
+      <div class="px-5 py-3 border-t border-border flex items-center justify-between gap-3 shrink-0">
+        <span class="text-[10px] text-muted-foreground font-mono">Pick up to 8 — search to narrow</span>
+        <button @click="routerKeys.routePickerOpen = false"
+                class="bg-primary text-primary-foreground font-600 px-4 py-2 rounded-xl text-sm hover:opacity-90 transition-opacity">Done</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Allowed-models picker for router API keys -->
   <div x-show="routerKeys.pickerOpen" x-transition.opacity
        class="fixed inset-0 z-[95] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1473,6 +1536,9 @@ function dashboard() {
       ],
       pickerOpen: false,
       pickerSearch: '',
+      routePickerOpen: false,
+      routePickerSearch: '',
+      routePickerIndex: null,
     },
 
     models: {
@@ -2032,13 +2098,13 @@ function dashboard() {
         .map(([name, targets], index) => ({
           id: `route-${index}-${name}`,
           name,
-          targets: targets.filter(m => typeof m === 'string').join(', ')
+          targets: targets.filter(m => typeof m === 'string').map(m => m.trim()).filter(Boolean)
         }));
     },
 
     addModelRoute() {
       const index = this.routerKeys.modelRoutes.length;
-      this.routerKeys.modelRoutes.push({ id: `route-new-${Date.now()}-${index}`, name: 'auto', targets: '' });
+      this.routerKeys.modelRoutes.push({ id: `route-new-${Date.now()}-${index}`, name: 'auto', targets: [] });
       this.$nextTick(() => window.refreshLucideIcons());
     },
 
@@ -2046,10 +2112,80 @@ function dashboard() {
       const routes = {};
       for (const route of this.routerKeys.modelRoutes) {
         const name = (route.name || '').trim();
-        const targets = (route.targets || '').split(',').map(m => m.trim()).filter(Boolean);
+        const targets = this.routeTargets(route);
         if (name) routes[name] = targets;
       }
       return routes;
+    },
+
+    routeTargets(route) {
+      const raw = Array.isArray(route?.targets) ? route.targets : String(route?.targets || '').split(',');
+      return [...new Set(raw.map(m => String(m || '').trim()).filter(Boolean))];
+    },
+
+    async openRouteModelPicker(index) {
+      if (!this.routerKeys.modelRoutes[index]) return;
+      // Reuse the already-cached model catalog. No provider request is made
+      // after the first opening of either picker.
+      if (!this.models.loaded) await this.fetchModels();
+      const route = this.routerKeys.modelRoutes[index];
+      route.targets = this.routeTargets(route);
+      this.routerKeys.routePickerIndex = index;
+      this.routerKeys.routePickerSearch = '';
+      this.routerKeys.routePickerOpen = true;
+      this.$nextTick(() => window.refreshLucideIcons());
+    },
+
+    routePickerModels() {
+      const q = this.routerKeys.routePickerSearch.trim().toLowerCase();
+      const list = q ? this.models._flat.filter(m => m.search.includes(q)) : this.models._flat;
+      return list.slice(0, 300);
+    },
+
+    routePickerTargets() {
+      const index = this.routerKeys.routePickerIndex;
+      const route = Number.isInteger(index) ? this.routerKeys.modelRoutes[index] : null;
+      return route ? this.routeTargets(route) : [];
+    },
+
+    toggleRouteModel(id) {
+      const index = this.routerKeys.routePickerIndex;
+      const route = Number.isInteger(index) ? this.routerKeys.modelRoutes[index] : null;
+      if (!route) return;
+      const targets = this.routeTargets(route);
+      const existing = targets.indexOf(id);
+      if (existing !== -1) {
+        targets.splice(existing, 1);
+      } else {
+        if (targets.length >= 8) {
+          this.toast('A route can have at most 8 fallback models', 'error');
+          return;
+        }
+        targets.push(id);
+        // A scoped key must allow every candidate. For a key with an
+        // explicit allowlist, selecting a route candidate adds it safely.
+        if (this.routerKeys.selectedModels.length && !this.routerKeys.selectedModels.includes(id)) {
+          this.routerKeys.selectedModels.push(id);
+        }
+      }
+      route.targets = targets;
+    },
+
+    clearRouteTargets() {
+      const index = this.routerKeys.routePickerIndex;
+      if (Number.isInteger(index) && this.routerKeys.modelRoutes[index]) {
+        this.routerKeys.modelRoutes[index].targets = [];
+      }
+    },
+
+    moveRouteTarget(routeIndex, targetIndex, direction) {
+      const route = this.routerKeys.modelRoutes[routeIndex];
+      if (!route) return;
+      const targets = this.routeTargets(route);
+      const next = targetIndex + direction;
+      if (next < 0 || next >= targets.length) return;
+      [targets[targetIndex], targets[next]] = [targets[next], targets[targetIndex]];
+      route.targets = targets;
     },
 
     // Doubles as the edit form: pass an existing key row to prefill it.
@@ -2057,6 +2193,9 @@ function dashboard() {
       const rk = this.routerKeys;
       rk.editingId = row ? row.id : null;
       rk.resetUsage = false;
+      rk.routePickerOpen = false;
+      rk.routePickerIndex = null;
+      rk.routePickerSearch = '';
       rk.usedTokens = row ? (row.tokens_used || 0) : 0;
       rk.newKeyName = row ? (row.key_name || '') : '';
 
@@ -2115,7 +2254,14 @@ function dashboard() {
     toggleKeyModel(id) {
       const i = this.routerKeys.selectedModels.indexOf(id);
       if (i === -1) this.routerKeys.selectedModels.push(id);
-      else this.routerKeys.selectedModels.splice(i, 1);
+      else {
+        this.routerKeys.selectedModels.splice(i, 1);
+        // Keep the settings valid: a route cannot retain a candidate that is
+        // no longer part of this key's explicit allowlist.
+        this.routerKeys.modelRoutes.forEach(route => {
+          route.targets = this.routeTargets(route).filter(target => target !== id);
+        });
+      }
     },
 
     selectAllVisibleModels() {
