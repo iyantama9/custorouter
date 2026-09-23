@@ -40,6 +40,7 @@ from app.database import verify_router_api_key, add_router_key_token_usage
 router = APIRouter()
 MAX_REQUEST_BODY_BYTES = max(1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(25 * 1024 * 1024))))
 _RETRYABLE_UPSTREAM_STATUSES = {401, 402, 403, 404, 429, 500, 502, 503, 504}
+_model_catalog_cache_enabled = True
 
 
 def _should_retry_custom_key(status_code: int, body) -> bool:
@@ -722,6 +723,7 @@ def _qwen_image_response(data: dict, model: str, msg_id: str) -> dict:
 @router.get("/models")
 @router.get("/v1/v1/models")
 async def list_models(request: Request):
+    global _model_catalog_cache_enabled
     if not await _check_router_auth(request):
         return JSONResponse(status_code=401, content={"error": {"message": "Invalid router password."}})
 
@@ -747,12 +749,14 @@ async def list_models(request: Request):
         "aliases": aliases,
     }
     cache_id = hashlib.sha256(json.dumps(catalog_fingerprint, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    try:
-        cached = await get_cached_json(f"models:v1:{cache_id}")
-        if cached is not None:
-            return JSONResponse(content=cached)
-    except (RedisError, RuntimeError):
-        pass
+    if _model_catalog_cache_enabled:
+        try:
+            cached = await get_cached_json(f"models:v1:{cache_id}")
+            if cached is not None:
+                return JSONResponse(content=cached)
+        except (RedisError, RuntimeError) as exc:
+            _model_catalog_cache_enabled = False
+            logger.warning("Redis model-catalog cache disabled: %s", type(exc).__name__)
 
     models = []
     disabled = config_module.DISABLED_PROVIDERS
@@ -794,10 +798,12 @@ async def list_models(request: Request):
         })
 
     result = {"object": "list", "data": data}
-    try:
-        await set_cached_json(f"models:v1:{cache_id}", result, 30)
-    except (RedisError, RuntimeError):
-        pass
+    if _model_catalog_cache_enabled:
+        try:
+            await set_cached_json(f"models:v1:{cache_id}", result, 30)
+        except (RedisError, RuntimeError) as exc:
+            _model_catalog_cache_enabled = False
+            logger.warning("Redis model-catalog cache disabled: %s", type(exc).__name__)
     return JSONResponse(content=result)
 
 
