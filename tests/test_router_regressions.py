@@ -1071,6 +1071,7 @@ class MobileDashboardPerformanceTests(unittest.TestCase):
         self.assertIn("routePickerModels()", self.dashboard)
         self.assertIn("toggleRouteModel(m.id)", self.dashboard)
         self.assertIn("moveRouteTarget(index, targetIndex", self.dashboard)
+        self.assertIn(".route-model-picker-layer { z-index: 110; }", self.dashboard)
         self.assertNotIn('placeholder="wz/model-a, qc/model-b, nn/model-c"', self.dashboard)
 
     def test_live_updates_are_coalesced(self):

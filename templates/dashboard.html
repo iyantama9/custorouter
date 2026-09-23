@@ -11,6 +11,10 @@
     max-width: 100%;
   }
   .dashboard-shell { overflow-x: hidden; }
+  /* Tailwind is precompiled in production, so an arbitrary z-[96] utility
+     added here would not exist in its stylesheet. Keep nested pickers above
+     the router-key dialog with an explicit, locally-owned layer. */
+  .route-model-picker-layer { z-index: 110; }
   .dashboard-table-scroll {
     width: 100%;
     min-width: 0;
@@ -1332,7 +1336,7 @@
   </div>
   <!-- Allowed-models picker for router API keys -->
   <div x-show="routerKeys.routePickerOpen" x-transition.opacity
-       class="fixed inset-0 z-[96] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+       class="route-model-picker-layer fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
        @keydown.escape.window="routerKeys.routePickerOpen = false">
     <div class="absolute inset-0" @click="routerKeys.routePickerOpen = false"></div>
     <div class="relative w-full max-w-2xl max-h-[82vh] bg-card border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col">
