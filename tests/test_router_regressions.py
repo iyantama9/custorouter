@@ -460,7 +460,7 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
 
     def test_route_candidates_are_internal_even_if_legacy_allowlisted(self):
         request = self._request_with_key(
-            {"auto": ["wz/first", "wz/second"]}, allowed="wz/direct"
+            {"auto": ["wz/first", "wz/second"]}, allowed="wz/direct,wz/first"
         )
         self.assertIsNone(proxy._model_allowed_for_key(request, "auto"))
         self.assertIsNone(proxy._model_allowed_for_key(request, "wz/direct"))
