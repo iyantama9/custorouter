@@ -53,19 +53,49 @@ async def fetch_one(query, *args):
 
 async def persist_request_log(
     model, status_code, key_prefix, rotated, latency_ms,
-    input_tokens, output_tokens, cached_tokens, provider,
+    input_tokens, output_tokens, cached_tokens, provider, event_id: str | None = None,
 ):
     """Persist one request log without adding counter writes to the hot path."""
     await execute(
         """
         INSERT INTO request_logs
             (model, status_code, key_prefix, rotated, latency_ms,
-             input_tokens, output_tokens, cached_tokens, provider)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             input_tokens, output_tokens, cached_tokens, provider, event_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (event_id) DO NOTHING
         """,
         model, status_code, key_prefix, rotated, latency_ms,
-        input_tokens, output_tokens, cached_tokens, provider,
+        input_tokens, output_tokens, cached_tokens, provider, event_id,
     )
+
+
+async def persist_request_log_batch(rows: list[dict]) -> None:
+    """Durably write Redis Stream events in one DB-pool checkout.
+
+    Stream delivery is at-least-once, so the unique event id makes a replay
+    harmless after a process restart between the database write and XACK.
+    """
+    if not rows or not _pool:
+        return
+    records = [
+        (
+            row["model"], row["status_code"], row["key_prefix"], row["rotated"],
+            row["latency_ms"], row["input_tokens"], row["output_tokens"],
+            row["cached_tokens"], row["provider"], row["event_id"],
+        )
+        for row in rows
+    ]
+    async with _pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO request_logs
+                (model, status_code, key_prefix, rotated, latency_ms,
+                 input_tokens, output_tokens, cached_tokens, provider, event_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (event_id) DO NOTHING
+            """,
+            records,
+        )
 
 async def get_lifetime_stats():
     """All-time request/token/rotation totals, computed straight from
@@ -114,6 +144,14 @@ async def setup_tables():
     """)
     await execute("""
         ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS cached_tokens INTEGER DEFAULT 0
+    """)
+    # Stream entries can be redelivered if the writer restarts mid-batch. The
+    # id is nullable for historical/direct records, while new stream records
+    # use it as an idempotency key.
+    await execute("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS event_id TEXT")
+    await execute("""
+        CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_logs_event_id_unique
+        ON request_logs(event_id)
     """)
     await execute("""
         ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS provider VARCHAR(20)

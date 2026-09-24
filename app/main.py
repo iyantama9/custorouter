@@ -27,6 +27,7 @@ from app.redis_store import init_redis, close_redis, redis_available
 import app.config as config_module
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
 from app.sse import sse_broadcaster
+from app.request_log_worker import run_request_log_worker
 from app.routers import admin, playground, proxy
 
 
@@ -54,11 +55,13 @@ async def _build_status_dict():
 async def lifespan(app: FastAPI):
     await proxy.init_http_clients()
     reset_task = None
+    request_log_task = None
     try:
         await init_db()
         await init_redis()
         await sse_broadcaster.start()
         await init_state_from_db()
+        request_log_task = asyncio.create_task(run_request_log_worker())
         print("[INIT] Database and Redis connected; state loaded")
 
         async def _auto_reset_loop():
@@ -74,6 +77,9 @@ async def lifespan(app: FastAPI):
         reset_task = asyncio.create_task(_auto_reset_loop())
         yield
     finally:
+        if request_log_task:
+            request_log_task.cancel()
+            await asyncio.gather(request_log_task, return_exceptions=True)
         if reset_task:
             reset_task.cancel()
             await asyncio.gather(reset_task, return_exceptions=True)

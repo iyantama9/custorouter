@@ -6,8 +6,9 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
-from app import database
+from app import database, redis_store
 from app import config
+from app.request_log_worker import _decode as decode_request_log_entries
 from app.translator import build_openai_request, compact_messages, stream_as_anthropic, to_anthropic_response
 from app.translator_openai import (
     anthropic_to_openai_response,
@@ -295,6 +296,46 @@ class LiveLogRedisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["total"], 42)
         self.assertEqual(result["total_pages"], 3)
         database_logs.assert_not_awaited()
+
+
+class RequestLogStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_log_enqueue_uses_bounded_redis_stream(self):
+        client = AsyncMock()
+        client.xadd.return_value = "1-0"
+        with patch.object(redis_store, "_redis", return_value=client):
+            entry_id = await redis_store.enqueue_request_log({"model": "wz/example"})
+
+        self.assertEqual(entry_id, "1-0")
+        self.assertEqual(client.xadd.await_args.args[0], "llm-router:request-logs:v1")
+        self.assertEqual(client.xadd.await_args.kwargs["maxlen"], redis_store.REQUEST_LOG_STREAM_MAXLEN)
+        self.assertTrue(client.xadd.await_args.kwargs["approximate"])
+
+    def test_stream_entries_decode_to_idempotent_database_rows(self):
+        rows, ids = decode_request_log_entries([("171-0", {"payload": json.dumps({
+            "model": "wz/example", "status_code": 200, "key_prefix": "key...",
+            "rotated": False, "latency_ms": 42, "input_tokens": 5,
+            "output_tokens": 7, "cached_tokens": 0, "provider": "weize",
+        })})])
+
+        self.assertEqual(ids, ["171-0"])
+        self.assertEqual(rows[0]["event_id"], "171-0")
+        self.assertEqual(rows[0]["output_tokens"], 7)
+
+    async def test_request_log_falls_back_to_postgres_when_redis_is_unavailable(self):
+        payload = {
+            "model": "wz/example", "status_code": 200, "key_prefix": "key...",
+            "rotated": False, "latency_ms": 42, "input_tokens": 5,
+            "output_tokens": 7, "cached_tokens": 0, "provider": "weize",
+        }
+        with (
+            patch.object(config, "enqueue_request_log", AsyncMock(side_effect=RuntimeError("down"))),
+            patch.object(config, "persist_request_log", AsyncMock()) as persist,
+        ):
+            await config._persist_request_log_off_path(payload)
+
+        persist.assert_awaited_once_with(
+            "wz/example", 200, "key...", False, 42, 5, 7, 0, "weize",
+        )
 
 
 class ModelRouteTests(unittest.IsolatedAsyncioTestCase):

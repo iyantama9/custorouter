@@ -13,6 +13,7 @@ from app.database import (
     get_lifetime_stats,
     persist_request_log,
 )
+from app.redis_store import enqueue_request_log
 
 load_dotenv()
 
@@ -198,6 +199,18 @@ def _bg(coro):
         asyncio.create_task(_wrapped())
     except RuntimeError:
         pass
+
+
+async def _persist_request_log_off_path(payload: dict) -> None:
+    """Use the durable Redis queue; fall back to direct Postgres on outage."""
+    try:
+        await enqueue_request_log(payload)
+    except Exception:
+        await persist_request_log(
+            payload["model"], payload["status_code"], payload["key_prefix"], payload["rotated"],
+            payload["latency_ms"], payload["input_tokens"], payload["output_tokens"],
+            payload["cached_tokens"], payload["provider"],
+        )
 
 
 async def init_state_from_db():
@@ -876,10 +889,17 @@ def add_request_log(model, status_code, key_used, rotated, latency_ms, input_tok
     if len(recent_requests) > 20:
         recent_requests.pop()
     # Persist to DB
-    _bg(persist_request_log(
-        model, status_code, log_item["key_used"], rotated, latency_ms,
-        input_tokens, output_tokens, cached_tokens, provider,
-    ))
+    _bg(_persist_request_log_off_path({
+        "model": model,
+        "status_code": status_code,
+        "key_prefix": log_item["key_used"],
+        "rotated": rotated,
+        "latency_ms": latency_ms,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+        "provider": provider,
+    }))
 
 
 def add_api_key(new_key: str, key_type: str = "auto"):

@@ -13,13 +13,15 @@ import os
 from typing import Any
 
 import redis.asyncio as redis
-from redis.exceptions import RedisError
+from redis.exceptions import RedisError, ResponseError
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "llm-router")
 LIVE_LOG_LIMIT = max(25, int(os.getenv("REDIS_LIVE_LOG_LIMIT", "250")))
 LIVE_LOG_TTL_SECONDS = max(60, int(os.getenv("REDIS_LIVE_LOG_TTL_SECONDS", "86400")))
+REQUEST_LOG_STREAM_MAXLEN = max(1_000, int(os.getenv("REDIS_REQUEST_LOG_STREAM_MAXLEN", "100000")))
+REQUEST_LOG_CONSUMER_GROUP = "request-log-writers-v1"
 
 _client: redis.Redis | None = None
 
@@ -186,3 +188,63 @@ async def redis_available() -> bool:
         return bool(await _redis().ping())
     except (RedisError, RuntimeError):
         return False
+
+
+def _request_log_stream_key() -> str:
+    return _key("request-logs:v1")
+
+
+async def ensure_request_log_consumer_group() -> None:
+    """Create the durable request-log consumer group once per deployment."""
+    try:
+        await _redis().xgroup_create(
+            _request_log_stream_key(), REQUEST_LOG_CONSUMER_GROUP, id="0-0", mkstream=True,
+        )
+    except ResponseError as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
+
+
+async def enqueue_request_log(payload: dict[str, Any]) -> str:
+    """Append a non-sensitive request-log payload without waiting for Postgres."""
+    return await _redis().xadd(
+        _request_log_stream_key(),
+        {"payload": json.dumps(payload, separators=(",", ":"))},
+        maxlen=REQUEST_LOG_STREAM_MAXLEN,
+        approximate=True,
+    )
+
+
+async def read_request_log_batch(consumer: str, count: int, block_ms: int = 1000):
+    entries = await _redis().xreadgroup(
+        REQUEST_LOG_CONSUMER_GROUP,
+        consumer,
+        {_request_log_stream_key(): ">"},
+        count=count,
+        block=block_ms,
+    )
+    return entries or []
+
+
+async def claim_stale_request_log_batch(consumer: str, count: int, min_idle_ms: int = 60_000):
+    """Take over unacknowledged entries from a stopped writer process."""
+    result = await _redis().xautoclaim(
+        _request_log_stream_key(),
+        REQUEST_LOG_CONSUMER_GROUP,
+        consumer,
+        min_idle_ms,
+        "0-0",
+        count=count,
+    )
+    # redis-py returns (next_start_id, [(id, fields)], deleted_ids).
+    return result[1] if result and len(result) > 1 else []
+
+
+async def ack_request_log_entries(entry_ids: list[str]) -> None:
+    if not entry_ids:
+        return
+    stream = _request_log_stream_key()
+    pipe = _redis().pipeline(transaction=True)
+    pipe.xack(stream, REQUEST_LOG_CONSUMER_GROUP, *entry_ids)
+    pipe.xdel(stream, *entry_ids)
+    await pipe.execute()
