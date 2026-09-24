@@ -1,0 +1,16 @@
+[Unit]
+Description=Reconcile Router and Arsiva Docker stacks after boot
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nas-compose-reconcile
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=20
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
