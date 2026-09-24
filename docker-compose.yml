@@ -46,6 +46,9 @@ services:
       # calls http://127.0.0.1:$PORT/v1/messages internally, so a mismatch here
       # breaks the Playground with "All connection attempts failed".
       - PORT=4000
+      # The collector is internal-only; the app uses batched HTTP OTLP export.
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
+      - OTEL_SERVICE_NAME=llm-router
     env_file:
       - .env
     depends_on:
@@ -65,6 +68,69 @@ services:
       # app remains private: the router gets no host-published application port.
       - nas_tunnel
 
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    container_name: llm-router-prometheus
+    restart: unless-stopped
+    environment:
+      - METRICS_TOKEN=${METRICS_TOKEN:?METRICS_TOKEN must be set}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        sed "s|__METRICS_TOKEN__|$${METRICS_TOKEN}|g" /etc/prometheus/prometheus.yml.template > /tmp/prometheus.yml
+        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=30d --web.enable-lifecycle=false
+    volumes:
+      - ./observability/prometheus.yml.template:/etc/prometheus/prometheus.yml.template:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      app:
+        condition: service_healthy
+    mem_limit: 384m
+
+  tempo:
+    image: grafana/tempo:3.0.3
+    container_name: llm-router-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/config.yml"]
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo/config.yml:ro
+      - tempo_data:/var/tempo
+    mem_limit: 256m
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.161.0
+    container_name: llm-router-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol/config.yml:ro
+    depends_on:
+      - tempo
+    mem_limit: 192m
+
+  grafana:
+    image: grafana/grafana:13.1.6
+    container_name: llm-router-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=iyanadmin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:%(http_port)s/
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+    mem_limit: 384m
+
   copilot-api:
     build: ../copilot-api
     container_name: copilot-api
@@ -80,6 +146,12 @@ volumes:
   copilot_api_data:
     driver: local
   redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  tempo_data:
+    driver: local
+  grafana_data:
     driver: local
 
 networks:

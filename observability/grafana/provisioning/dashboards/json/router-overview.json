@@ -1,0 +1,51 @@
+{
+  "uid": "router-overview",
+  "title": "LLM Router Overview",
+  "tags": ["router", "inference"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "15s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "p95 upstream latency by provider",
+      "datasource": {"type": "prometheus", "uid": "router-prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(router_inference_latency_seconds_bucket[5m])))", "legendFormat": "{{provider}}"}],
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 2}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "p95 TTFT by provider",
+      "datasource": {"type": "prometheus", "uid": "router-prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(router_inference_ttft_seconds_bucket[5m])))", "legendFormat": "{{provider}}"}],
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 2}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Error ratio by provider",
+      "datasource": {"type": "prometheus", "uid": "router-prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (provider) (rate(router_inference_requests_total{status_class=~\"4xx|5xx\"}[5m])) / clamp_min(sum by (provider) (rate(router_inference_requests_total[5m])), 0.001)", "legendFormat": "{{provider}}"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 9}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active inference / DB pool in use",
+      "datasource": {"type": "prometheus", "uid": "router-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "router_active_inference_requests", "legendFormat": "active inference"},
+        {"refId": "B", "expr": "router_db_pool_connections{state=\"in_use\"}", "legendFormat": "DB pool in use"}
+      ],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 9}
+    }
+  ]
+}

@@ -29,6 +29,7 @@ from app.translator_openai import (
     openai_tools_to_anthropic, openai_tool_choice_to_anthropic,
 )
 from app.sse import sse_broadcaster
+from app.observability import annotate_current_request
 from app.redis_store import (
     claim_router_key_last_used_touch,
     filter_healthy_model_route_candidates,
@@ -270,7 +271,28 @@ async def _read_json_payload(request: Request):
             status_code=400,
             content={"error": {"message": "Request body must be a JSON object."}},
         )
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        request.state.metrics_model = model
+        request.state.metrics_provider = model.split("/", 1)[0] if "/" in model else "builtin"
+    request.state.metrics_stream = bool(payload.get("stream"))
+    annotate_current_request(
+        model=model if isinstance(model, str) else None,
+        provider=getattr(request.state, "metrics_provider", None),
+        streamed=getattr(request.state, "metrics_stream", None),
+    )
     return payload, None
+
+
+def _annotate_metrics_route(request: Request, model: str, provider: str) -> None:
+    """Update span/TTFT labels after resolving the real upstream provider."""
+    request.state.metrics_model = model
+    request.state.metrics_provider = provider
+    annotate_current_request(
+        model=model,
+        provider=provider,
+        streamed=getattr(request.state, "metrics_stream", None),
+    )
 
 
 def _router_key(request: Request):
@@ -1009,6 +1031,7 @@ async def messages(request: Request):
 
     for cprefix in config_module.CUSTOM_PROVIDERS:
         if requested_model_raw.startswith(f"{cprefix}/"):
+            _annotate_metrics_route(request, requested_model_raw, cprefix)
             payload["model"] = requested_model_raw[len(cprefix) + 1:]
             want_stream = bool(payload.get("stream"))
             start_req_time = time.time()
@@ -1067,6 +1090,7 @@ async def messages(request: Request):
             return JSONResponse(status_code=status, content=body)
 
     provider = _builtin_provider_for_model(requested_model_raw)
+    _annotate_metrics_route(request, requested_model_raw, provider)
     if provider in config_module.DISABLED_PROVIDERS:
         return JSONResponse(status_code=503, content={"error": {"message": f"Provider '{provider}' has been removed."}})
 
@@ -1764,6 +1788,7 @@ async def chat_completions(request: Request):
 
     for cprefix in config_module.CUSTOM_PROVIDERS:
         if requested_model.startswith(f"{cprefix}/"):
+            _annotate_metrics_route(request, requested_model, cprefix)
             model_name = requested_model[len(cprefix) + 1:]
             if config_module.CUSTOM_PROVIDERS[cprefix]["api_format"] == "openai":
                 upstream_payload = {**payload, "model": model_name}
@@ -1904,6 +1929,7 @@ async def chat_completions(request: Request):
             return StreamingResponse(_relay_openai_stream(), media_type="text/event-stream")
 
     provider = _builtin_provider_for_model(requested_model)
+    _annotate_metrics_route(request, requested_model, provider)
 
     if provider in config_module.DISABLED_PROVIDERS:
         return JSONResponse(status_code=503, content={"error": {"message": f"Provider '{provider}' has been removed."}})

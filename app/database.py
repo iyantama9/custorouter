@@ -1,5 +1,7 @@
 import os
+import time
 from dotenv import load_dotenv
+from app.metrics import observe_db_pool
 
 load_dotenv()
 
@@ -7,6 +9,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DB_POOL_MIN_SIZE = max(1, int(os.getenv("DB_POOL_MIN_SIZE", "2")))
 DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, int(os.getenv("DB_POOL_MAX_SIZE", "10")))
 DB_COMMAND_TIMEOUT = max(1.0, float(os.getenv("DB_COMMAND_TIMEOUT", "30")))
+REQUEST_LOG_RETENTION_DAYS = max(0, int(os.getenv("REQUEST_LOG_RETENTION_DAYS", "0")))
 
 _pool = None
 
@@ -32,19 +35,25 @@ async def close_db():
 async def execute(query, *args):
     if not _pool:
         return
+    started = time.perf_counter()
     async with _pool.acquire() as conn:
+        observe_db_pool(time.perf_counter() - started, _pool.get_size(), _pool.get_idle_size())
         return await conn.execute(query, *args)
 
 async def fetch(query, *args):
     if not _pool:
         return []
+    started = time.perf_counter()
     async with _pool.acquire() as conn:
+        observe_db_pool(time.perf_counter() - started, _pool.get_size(), _pool.get_idle_size())
         return await conn.fetch(query, *args)
 
 async def fetchrow(query, *args):
     if not _pool:
         return None
+    started = time.perf_counter()
     async with _pool.acquire() as conn:
+        observe_db_pool(time.perf_counter() - started, _pool.get_size(), _pool.get_idle_size())
         return await conn.fetchrow(query, *args)
 
 async def fetch_one(query, *args):
@@ -85,7 +94,9 @@ async def persist_request_log_batch(rows: list[dict]) -> None:
         )
         for row in rows
     ]
+    started = time.perf_counter()
     async with _pool.acquire() as conn:
+        observe_db_pool(time.perf_counter() - started, _pool.get_size(), _pool.get_idle_size())
         await conn.executemany(
             """
             INSERT INTO request_logs
@@ -116,6 +127,52 @@ async def get_lifetime_stats():
     if not row:
         return {"total_requests": 0, "total_tokens": 0, "total_rotations": 0}
     return dict(row)
+
+
+async def refresh_request_log_hourly_rollups(hours: int = 3) -> None:
+    """Refresh only current/recent buckets; old hourly buckets are immutable."""
+    hours = max(1, min(int(hours), 24))
+    await execute("""
+        INSERT INTO request_log_hourly
+            (hour_start, provider, model, status_class, requests, errors,
+             latency_ms_total, input_tokens, output_tokens)
+        SELECT
+            date_trunc('hour', created_at),
+            COALESCE(NULLIF(provider, ''), split_part(model, '/', 1)),
+            COALESCE(model, ''),
+            CONCAT((status_code / 100)::text, 'xx'),
+            COUNT(*),
+            COUNT(*) FILTER (WHERE status_code >= 400),
+            COALESCE(SUM(latency_ms), 0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0)
+        FROM request_logs
+        WHERE created_at >= date_trunc('hour', NOW()) - ($1::int * INTERVAL '1 hour')
+        GROUP BY 1, 2, 3, 4
+        ON CONFLICT (hour_start, provider, model, status_class) DO UPDATE SET
+            requests = EXCLUDED.requests,
+            errors = EXCLUDED.errors,
+            latency_ms_total = EXCLUDED.latency_ms_total,
+            input_tokens = EXCLUDED.input_tokens,
+            output_tokens = EXCLUDED.output_tokens
+    """, hours)
+
+
+async def prune_request_logs(batch_size: int = 5_000) -> int:
+    """Delete one bounded batch only when an explicit retention policy exists."""
+    if REQUEST_LOG_RETENTION_DAYS <= 0:
+        return 0
+    rows = await fetch("""
+        WITH expired AS (
+            SELECT id FROM request_logs
+            WHERE created_at < NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY id
+            LIMIT $2
+        )
+        DELETE FROM request_logs WHERE id IN (SELECT id FROM expired)
+        RETURNING id
+    """, REQUEST_LOG_RETENTION_DAYS, max(1, min(int(batch_size), 50_000)))
+    return len(rows)
 
 async def setup_tables():
     await execute("""
@@ -152,6 +209,18 @@ async def setup_tables():
     await execute("""
         CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_logs_event_id_unique
         ON request_logs(event_id)
+    """)
+    # Dashboard filtering uses ``ILIKE '%query%'`` across two columns. A
+    # normal B-tree cannot accelerate that substring query as the journal
+    # grows, while trigram GIN indexes can be built without blocking writes.
+    await execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_logs_model_trgm
+        ON request_logs USING GIN (model gin_trgm_ops)
+    """)
+    await execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_logs_key_prefix_trgm
+        ON request_logs USING GIN (key_prefix gin_trgm_ops)
     """)
     await execute("""
         ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS provider VARCHAR(20)
@@ -228,6 +297,22 @@ async def setup_tables():
     """)
     await execute("""
         CREATE INDEX IF NOT EXISTS idx_logs_key_prefix ON request_logs(key_prefix)
+    """)
+    # Rollups keep long-horizon operational queries independent from raw-log
+    # growth. They are additive and do not alter the source journal.
+    await execute("""
+        CREATE TABLE IF NOT EXISTS request_log_hourly (
+            hour_start TIMESTAMP WITH TIME ZONE NOT NULL,
+            provider VARCHAR(40) NOT NULL,
+            model VARCHAR(200) NOT NULL,
+            status_class VARCHAR(8) NOT NULL,
+            requests BIGINT NOT NULL,
+            errors BIGINT NOT NULL,
+            latency_ms_total BIGINT NOT NULL,
+            input_tokens BIGINT NOT NULL,
+            output_tokens BIGINT NOT NULL,
+            PRIMARY KEY (hour_start, provider, model, status_class)
+        )
     """)
     # ── Playground Tables ──
     await execute("""

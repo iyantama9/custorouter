@@ -14,6 +14,7 @@ from app.database import (
     persist_request_log,
 )
 from app.redis_store import enqueue_request_log
+from app.metrics import observe_inference
 
 load_dotenv()
 
@@ -872,6 +873,7 @@ def add_request_log(model, status_code, key_used, rotated, latency_ms, input_tok
     timestamp = (datetime.datetime.utcnow() + datetime.timedelta(hours=7)).strftime("%H:%M:%S")
     if provider is None:
         provider = provider_from_model(model)
+    observe_inference(model, provider, status_code, latency_ms, rotated)
     log_item = {
         "id": f"live-{time.time_ns()}",
         "timestamp": timestamp,

@@ -12,17 +12,23 @@
 # ///
 
 import asyncio
+import hmac
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
-from app.database import init_db, close_db
+from app.database import (
+    close_db,
+    init_db,
+    prune_request_logs,
+    refresh_request_log_hourly_rollups,
+)
 from app.redis_store import (
     init_redis, close_redis, redis_available, ensure_request_log_consumer_group,
     request_log_worker_healthy,
@@ -32,6 +38,8 @@ from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KE
 from app.sse import sse_broadcaster
 from app.request_log_worker import run_request_log_worker
 from app.routers import admin, playground, proxy
+from app.metrics import observe_active_inference, observe_ttft, render_metrics
+from app.observability import configure_tracing
 
 
 async def _build_status_dict():
@@ -59,6 +67,7 @@ async def lifespan(app: FastAPI):
     await proxy.init_http_clients()
     reset_task = None
     request_log_task = None
+    journal_maintenance_task = None
     try:
         await init_db()
         await init_redis()
@@ -69,6 +78,24 @@ async def lifespan(app: FastAPI):
         await sse_broadcaster.start()
         await init_state_from_db()
         request_log_task = asyncio.create_task(run_request_log_worker())
+
+        async def _journal_maintenance_loop():
+            run = 0
+            while True:
+                try:
+                    await refresh_request_log_hourly_rollups()
+                    # Retention is explicit/opt-in; one small batch prevents
+                    # long locks if an owner later turns it on.
+                    if run % 72 == 0:
+                        await prune_request_logs()
+                    run += 1
+                except Exception:
+                    # Statistics must never make inference unavailable.
+                    import logging
+                    logging.getLogger(__name__).exception("Request-log maintenance failed")
+                await asyncio.sleep(300)
+
+        journal_maintenance_task = asyncio.create_task(_journal_maintenance_loop())
         print("[INIT] Database and Redis connected; state loaded")
 
         async def _auto_reset_loop():
@@ -87,6 +114,9 @@ async def lifespan(app: FastAPI):
         if request_log_task:
             request_log_task.cancel()
             await asyncio.gather(request_log_task, return_exceptions=True)
+        if journal_maintenance_task:
+            journal_maintenance_task.cancel()
+            await asyncio.gather(journal_maintenance_task, return_exceptions=True)
         if reset_task:
             reset_task.cancel()
             await asyncio.gather(reset_task, return_exceptions=True)
@@ -94,10 +124,13 @@ async def lifespan(app: FastAPI):
         await sse_broadcaster.stop()
         await close_redis()
         await close_db()
+        if _trace_provider:
+            _trace_provider.shutdown()
         print("[INIT] Database connection closed")
 
 
 app = FastAPI(lifespan=lifespan)
+_trace_provider = configure_tracing(app)
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 
@@ -109,6 +142,16 @@ async def health_check():
     if not await request_log_worker_healthy():
         return JSONResponse(status_code=503, content={"status": "degraded", "redis": "ok", "request_log_worker": "unavailable"})
     return {"status": "ok", "redis": "ok", "request_log_worker": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint(request: Request):
+    """Private Prometheus target; never expose provider/model telemetry publicly."""
+    expected = os.getenv("METRICS_TOKEN", "")
+    auth = request.headers.get("authorization", "")
+    if not expected or not hmac.compare_digest(auth, f"Bearer {expected}"):
+        return Response(status_code=404)
+    return Response(content=render_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 _INFERENCE_REQUEST_PATHS = {
@@ -159,23 +202,34 @@ async def security_and_observability_headers(request, call_next):
     else:
         if is_inference:
             config_module.active_inference_requests += 1
+            observe_active_inference(config_module.active_inference_requests)
             tracking_inference = True
         try:
             response = await call_next(request)
         except Exception:
             if tracking_inference:
                 config_module.active_inference_requests -= 1
+                observe_active_inference(config_module.active_inference_requests)
             raise
 
     if tracking_inference:
         body_iterator = response.body_iterator
 
         async def _tracked_body():
+            first_chunk = True
             try:
                 async for chunk in body_iterator:
+                    if first_chunk:
+                        first_chunk = False
+                        if getattr(request.state, "metrics_stream", False):
+                            selected = response.headers.get("X-Router-Model-Selected")
+                            model = selected or getattr(request.state, "metrics_model", None)
+                            provider = model.split("/", 1)[0] if model and "/" in model else getattr(request.state, "metrics_provider", None)
+                            observe_ttft(model, provider, response.status_code, time.perf_counter() - started)
                     yield chunk
             finally:
                 config_module.active_inference_requests -= 1
+                observe_active_inference(config_module.active_inference_requests)
 
         response.body_iterator = _tracked_body()
     response.headers["X-Request-ID"] = request_id

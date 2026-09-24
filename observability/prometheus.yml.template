@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 8s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: llm-router
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: __METRICS_TOKEN__
+    static_configs:
+      - targets: ["app:4000"]
