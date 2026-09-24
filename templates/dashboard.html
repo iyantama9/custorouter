@@ -1290,7 +1290,7 @@
                   </span>
                 </template>
               </div>
-              <p class="text-[10px] text-muted-foreground/60">Pick from the catalog; first model is tried first. Use arrows to set the fallback order (max 8).</p>
+              <p class="text-[10px] text-muted-foreground/60">Pick from the catalog; router stops at the first successful response. Use arrows to set fallback order (max 24).</p>
             </div>
           </template>
         </div>
@@ -1377,7 +1377,7 @@
       </div>
 
       <div class="px-5 py-3 border-t border-border flex items-center justify-between gap-3 shrink-0">
-        <span class="text-[10px] text-muted-foreground font-mono">Pick up to 8 — search to narrow</span>
+        <span class="text-[10px] text-muted-foreground font-mono">Pick up to 24 — search to narrow</span>
         <button @click="routerKeys.routePickerOpen = false"
                 class="bg-primary text-primary-foreground font-600 px-4 py-2 rounded-xl text-sm hover:opacity-90 transition-opacity">Done</button>
       </div>
@@ -2161,8 +2161,8 @@ function dashboard() {
       if (existing !== -1) {
         targets.splice(existing, 1);
       } else {
-        if (targets.length >= 8) {
-          this.toast('A route can have at most 8 fallback models', 'error');
+        if (targets.length >= 24) {
+          this.toast('A route can have at most 24 fallback models', 'error');
           return;
         }
         targets.push(id);

@@ -800,7 +800,7 @@ class _KeySettingsError(Exception):
 
 _MODEL_ROUTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 _MAX_MODEL_ROUTES = 20
-_MAX_ROUTE_CANDIDATES = 8
+_MAX_ROUTE_CANDIDATES = 24
 
 
 def _parse_key_settings(payload: dict):

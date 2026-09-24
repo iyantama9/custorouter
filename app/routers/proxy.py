@@ -38,6 +38,7 @@ from app.database import verify_router_api_key, add_router_key_token_usage
 
 
 router = APIRouter()
+_MAX_MODEL_ROUTE_CANDIDATES = 24
 MAX_REQUEST_BODY_BYTES = max(1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(25 * 1024 * 1024))))
 _RETRYABLE_UPSTREAM_STATUSES = {401, 402, 403, 404, 429, 500, 502, 503, 504}
 _model_catalog_cache_enabled = True
@@ -281,7 +282,7 @@ def _key_model_routes(request: Request) -> dict[str, list[str]]:
         clean = [candidate.strip() for candidate in candidates
                  if isinstance(candidate, str) and candidate.strip()]
         if clean:
-            routes[name] = clean[:8]
+            routes[name] = clean[:_MAX_MODEL_ROUTE_CANDIDATES]
     return routes
 
 
@@ -893,6 +894,14 @@ async def list_models(request: Request):
         if allowed_raw:
             allowed = {m.strip() for m in allowed_raw.split(",") if m.strip()}
             models = [m for m in models if m in allowed]
+        # Route candidates are implementation details. Expose only the
+        # synthetic route name (for example, ``auto``) to the owning key, so
+        # an SDK cannot accidentally bypass its failover chain by selecting a
+        # backing model directly.
+        routed_candidates = {
+            candidate for candidates in model_routes.values() for candidate in candidates
+        }
+        models = [m for m in models if m not in routed_candidates]
         if aliases:
             models = [aliases.get(m, m) for m in models]
         # Synthetic route names such as "auto" are intentionally advertised

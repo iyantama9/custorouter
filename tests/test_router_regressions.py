@@ -349,6 +349,31 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(proxy._model_allowed_for_key(request, "wz/first"))
         self.assertIn("not allowed", proxy._model_allowed_for_key(request, "wz/other"))
 
+    def test_route_reader_keeps_up_to_twenty_four_candidates(self):
+        candidates = [f"test/{index}" for index in range(25)]
+        request = self._request_with_key({"auto": candidates}, allowed=",".join(candidates))
+        self.assertEqual(proxy._key_model_routes(request)["auto"], candidates[:24])
+
+    async def test_model_catalog_exposes_route_but_hides_its_candidates(self):
+        request = self._request_with_key(
+            {"auto": ["test/first", "test/second"]},
+            allowed="test/first,test/second",
+        )
+        cache_enabled = proxy._model_catalog_cache_enabled
+        proxy._model_catalog_cache_enabled = False
+        try:
+            with (
+                patch.object(proxy, "_check_router_auth", AsyncMock(return_value=True)),
+                patch.dict(config.CUSTOM_PROVIDERS, {"test": {"models": ["first", "second"]}}, clear=True),
+                patch.object(config, "DISABLED_PROVIDERS", {"bm", "nry", "dahl", "qc", "marketku"}),
+            ):
+                response = await proxy.list_models(request)
+        finally:
+            proxy._model_catalog_cache_enabled = cache_enabled
+
+        ids = [model["id"] for model in json.loads(response.body)["data"]]
+        self.assertEqual(ids, ["auto"])
+
     def test_route_settings_reject_route_targets_and_unallowed_models(self):
         with self.assertRaises(admin._KeySettingsError):
             admin._parse_key_settings({
