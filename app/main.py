@@ -179,7 +179,7 @@ async def security_and_observability_headers(request, call_next):
     # Bearer-authenticated proxy APIs are unaffected.
     if (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
-        and request.url.path.startswith("/api/")
+        and request.url.path.startswith(("/api/", "/observability"))
         and request.cookies.get("session_token")
     ):
         if request.headers.get("sec-fetch-site") == "cross-site":
@@ -238,16 +238,23 @@ async def security_and_observability_headers(request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; "
-        "form-action 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net "
-        "https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; "
-        "connect-src 'self' https:"
-    )
+    if request.url.path.startswith("/observability"):
+        # Grafana supplies its own resource policy. Keep it unframeable without
+        # overwriting the dashboard's stricter, version-specific policy.
+        response.headers.setdefault(
+            "Content-Security-Policy", "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        )
+    else:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; "
+            "form-action 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net "
+            "https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; "
+            "connect-src 'self' https:"
+        )
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    if request.url.path.startswith("/api/") or request.url.path in ("/dashboard", "/login"):
+    if request.url.path.startswith(("/api/", "/observability")) or request.url.path in ("/dashboard", "/login"):
         response.headers["Cache-Control"] = "no-store"
     return response
 

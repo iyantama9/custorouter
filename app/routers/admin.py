@@ -50,6 +50,12 @@ _LOGIN_GLOBAL_MAX_ATTEMPTS = 30
 _LOGIN_WINDOW_SECONDS = 15 * 60
 _LOGIN_GLOBAL_WINDOW_SECONDS = 60
 _SESSION_TTL_SECONDS = int(os.getenv("DASHBOARD_SESSION_TTL_SECONDS", str(14 * 24 * 60 * 60)))
+_GRAFANA_UPSTREAM_URL = os.getenv("GRAFANA_UPSTREAM_URL", "http://grafana:3000").rstrip("/")
+_GRAFANA_MAX_BODY_BYTES = 1_048_576
+_HOP_BY_HOP_HEADERS = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+})
 _TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
 _TRUSTED_PROXY_IPS = {
     address.strip() for address in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
@@ -130,6 +136,93 @@ async def get_dashboard(request: Request, session_token: str = Cookie(default=No
     if not await _valid_session(session_token):
         return RedirectResponse(url="/login", status_code=303)
     return templates.TemplateResponse(request=request, name="dashboard.html")
+
+
+@router.get("/observability", include_in_schema=False)
+async def observability_root():
+    """Keep Grafana's configured sub-path and relative assets intact."""
+    return RedirectResponse(url="/observability/", status_code=307)
+
+
+@router.api_route(
+    "/observability/{grafana_path:path}",
+    methods=["GET", "HEAD", "POST", "OPTIONS"],
+    include_in_schema=False,
+)
+async def observability_proxy(
+    request: Request,
+    grafana_path: str,
+):
+    """Serve the private Grafana instance through the router admin session.
+
+    The upstream is fixed (not client controlled), router session cookies are
+    deliberately never forwarded, and Grafana runs as a read-only anonymous
+    Viewer. This keeps the operator UI available at one public hostname without
+    publishing Grafana's host port or a second internet-facing login.
+    """
+    try:
+        authenticated = await _valid_session(request.cookies.get("session_token"))
+    except (RedisError, RuntimeError):
+        return JSONResponse(status_code=503, content={"detail": "Authentication service temporarily unavailable"})
+    if not authenticated:
+        # A browser opening the direct bookmark gets the normal router login,
+        # rather than a bare JSON 401. Assets remain protected by the same
+        # server-side session check.
+        return RedirectResponse(url="/login", status_code=303)
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > _GRAFANA_MAX_BODY_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
+    body = await request.body()
+    if len(body) > _GRAFANA_MAX_BODY_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+
+    forward_headers = {
+        name: value for name, value in request.headers.items()
+        if name.lower() not in _HOP_BY_HOP_HEADERS | {"host", "cookie", "authorization", "content-length"}
+    }
+    forward_headers.update({
+        "Host": "grafana:3000",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Prefix": "/observability",
+    })
+    upstream_url = f"{_GRAFANA_UPSTREAM_URL}/observability/{grafana_path}"
+    if request.url.query:
+        upstream_url = f"{upstream_url}?{request.url.query}"
+
+    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=3.0, read=30.0, write=10.0, pool=3.0))
+    try:
+        upstream_request = client.build_request(
+            request.method, upstream_url, headers=forward_headers, content=body,
+        )
+        upstream_response = await client.send(upstream_request, stream=True)
+    except httpx.HTTPError:
+        await client.aclose()
+        return JSONResponse(status_code=502, content={"detail": "Observability service unavailable"})
+
+    response_headers = {
+        name: value for name, value in upstream_response.headers.items()
+        if name.lower() not in _HOP_BY_HOP_HEADERS | {"set-cookie", "server"}
+    }
+
+    async def stream_upstream():
+        try:
+            async for chunk in upstream_response.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_response.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        stream_upstream(),
+        status_code=upstream_response.status_code,
+        headers=response_headers,
+        media_type=upstream_response.headers.get("content-type"),
+    )
 
 
 @router.post("/api/login")
