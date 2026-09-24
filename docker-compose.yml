@@ -84,7 +84,8 @@ services:
       - ./observability/prometheus.yml.template:/etc/prometheus/prometheus.yml.template:ro
       - prometheus_data:/prometheus
     ports:
-      - "127.0.0.1:9090:9090"
+      # 9090 belongs to an unrelated host monitoring stack on production.
+      - "127.0.0.1:9091:9090"
     depends_on:
       app:
         condition: service_healthy

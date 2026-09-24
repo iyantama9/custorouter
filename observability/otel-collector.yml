@@ -14,7 +14,7 @@ processors:
     timeout: 5s
 
 exporters:
-  otlphttp/tempo:
+  otlp_http/tempo:
     endpoint: http://tempo:4318
     tls:
       insecure: true
@@ -24,4 +24,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlphttp/tempo]
+      exporters: [otlp_http/tempo]
