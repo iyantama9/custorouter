@@ -383,16 +383,63 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
             seen.append((body["model"], candidate_request.state.model_route_active))
             return JSONResponse(status_code=503 if body["model"] == "wz/first" else 200, content={})
 
-        response = await proxy._run_model_route(
-            endpoint, request, {"model": "auto", "messages": []},
-            "auto", ["wz/first", "wz/second"],
-        )
+        with (
+            patch.object(proxy, "filter_healthy_model_route_candidates", AsyncMock(return_value=["wz/first", "wz/second"])),
+            patch.object(proxy, "record_model_route_result", AsyncMock()),
+        ):
+            response = await proxy._run_model_route(
+                endpoint, request, {"model": "auto", "messages": []},
+                "auto", ["wz/first", "wz/second"],
+            )
 
         self.assertEqual(seen, [("wz/first", True), ("wz/second", True)])
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-router-model-route"], "auto")
         self.assertEqual(response.headers["x-router-model-selected"], "wz/second")
         self.assertEqual(response.headers["x-router-model-attempt"], "2")
+
+    async def test_route_skips_recently_failed_candidate_but_keeps_order(self):
+        request = self._request_with_key({"auto": ["wz/first", "wz/second", "wz/third"]})
+        seen = []
+
+        async def endpoint(candidate_request):
+            body = await candidate_request.json()
+            seen.append(body["model"])
+            return JSONResponse(status_code=200, content={})
+
+        with (
+            patch.object(proxy, "filter_healthy_model_route_candidates", AsyncMock(return_value=["wz/second", "wz/third"])),
+            patch.object(proxy, "record_model_route_result", AsyncMock()) as record,
+        ):
+            response = await proxy._run_model_route(
+                endpoint, request, {"model": "auto", "messages": []},
+                "auto", ["wz/first", "wz/second", "wz/third"],
+            )
+
+        self.assertEqual(seen, ["wz/second"])
+        self.assertEqual(response.headers["x-router-model-selected"], "wz/second")
+        record.assert_awaited_once_with("wz/second", 200)
+
+    async def test_route_retries_all_candidates_when_every_circuit_is_open(self):
+        request = self._request_with_key({"auto": ["wz/first", "wz/second"]})
+        seen = []
+
+        async def endpoint(candidate_request):
+            body = await candidate_request.json()
+            seen.append(body["model"])
+            return JSONResponse(status_code=200 if body["model"] == "wz/first" else 503, content={})
+
+        with (
+            patch.object(proxy, "filter_healthy_model_route_candidates", AsyncMock(return_value=[])),
+            patch.object(proxy, "record_model_route_result", AsyncMock()),
+        ):
+            response = await proxy._run_model_route(
+                endpoint, request, {"model": "auto", "messages": []},
+                "auto", ["wz/first", "wz/second"],
+            )
+
+        self.assertEqual(seen, ["wz/first"])
+        self.assertEqual(response.status_code, 200)
 
     def test_route_is_allowed_but_its_candidates_remain_allowlisted(self):
         request = self._request_with_key({"auto": ["wz/first", "wz/second"]})

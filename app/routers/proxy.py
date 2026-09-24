@@ -29,7 +29,12 @@ from app.translator_openai import (
     openai_tools_to_anthropic, openai_tool_choice_to_anthropic,
 )
 from app.sse import sse_broadcaster
-from app.redis_store import get_cached_json, set_cached_json
+from app.redis_store import (
+    filter_healthy_model_route_candidates,
+    get_cached_json,
+    record_model_route_result,
+    set_cached_json,
+)
 from redis.exceptions import RedisError
 
 
@@ -378,9 +383,16 @@ def _should_fallback_model_response(response) -> bool:
 
 async def _run_model_route(endpoint, request: Request, payload: dict,
                            route_name: str, candidates: list[str]):
-    """Attempt the configured models in order and annotate the chosen result."""
+    """Attempt healthy configured models in order and annotate the result.
+
+    Redis only suppresses candidates which recently failed at the upstream.
+    If every candidate is cooling down, the configured list is retried rather
+    than returning a synthetic error; this lets a provider recover early.
+    """
+    eligible = await filter_healthy_model_route_candidates(candidates)
+    attempt_candidates = eligible or candidates
     last_response = None
-    for attempt, candidate in enumerate(candidates, start=1):
+    for attempt, candidate in enumerate(attempt_candidates, start=1):
         candidate_payload = dict(payload)
         candidate_payload["model"] = candidate
         routed_request = _clone_request_for_model_route(request, candidate_payload, route_name)
@@ -389,7 +401,9 @@ async def _run_model_route(endpoint, request: Request, payload: dict,
         response.headers["X-Router-Model-Selected"] = candidate
         response.headers["X-Router-Model-Attempt"] = str(attempt)
         if not _should_fallback_model_response(response):
+            await record_model_route_result(candidate, response.status_code)
             return response
+        await record_model_route_result(candidate, response.status_code)
         last_response = response
     return last_response or JSONResponse(
         status_code=503,

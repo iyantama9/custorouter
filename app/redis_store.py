@@ -22,6 +22,9 @@ LIVE_LOG_LIMIT = max(25, int(os.getenv("REDIS_LIVE_LOG_LIMIT", "250")))
 LIVE_LOG_TTL_SECONDS = max(60, int(os.getenv("REDIS_LIVE_LOG_TTL_SECONDS", "86400")))
 REQUEST_LOG_STREAM_MAXLEN = max(1_000, int(os.getenv("REDIS_REQUEST_LOG_STREAM_MAXLEN", "100000")))
 REQUEST_LOG_CONSUMER_GROUP = "request-log-writers-v1"
+MODEL_ROUTE_BREAKER_MAX_SECONDS = max(
+    10, int(os.getenv("REDIS_MODEL_ROUTE_BREAKER_MAX_SECONDS", "300"))
+)
 
 _client: redis.Redis | None = None
 
@@ -248,3 +251,53 @@ async def ack_request_log_entries(entry_ids: list[str]) -> None:
     # Deleting the final entry can delete the stream key itself on Redis, which
     # also discards its consumer group and makes the next XREADGROUP fail.
     await _redis().xack(stream, REQUEST_LOG_CONSUMER_GROUP, *entry_ids)
+
+
+def _model_route_breaker_key(model: str) -> str:
+    """Return a bounded Redis key for one fallback candidate.
+
+    Model IDs are admin-controlled today, but hashing keeps Redis key shape
+    predictable and avoids allowing arbitrary punctuation into operational
+    keys if a provider ever returns an unusual ID.
+    """
+    digest = hashlib.sha256(model.encode("utf-8")).hexdigest()
+    return _key(f"model-route:open:{digest}")
+
+
+async def filter_healthy_model_route_candidates(candidates: list[str]) -> list[str]:
+    """Keep configured order while skipping candidates in a short cooldown.
+
+    A Redis failure deliberately returns the original list: routing must stay
+    available if optional performance state is temporarily unavailable.
+    """
+    if not candidates:
+        return []
+    try:
+        states = await _redis().mget(*[_model_route_breaker_key(model) for model in candidates])
+    except (RedisError, RuntimeError):
+        return list(candidates)
+    return [model for model, state in zip(candidates, states) if state is None]
+
+
+async def record_model_route_result(model: str, status_code: int) -> None:
+    """Open a bounded circuit after an upstream-only route failure.
+
+    Client/input errors (400/413/422) are intentionally excluded: changing
+    the fallback model cannot repair them and globally penalising a model for
+    one request would make routing surprising. Success immediately closes the
+    circuit; repeated upstream/rate/quota errors back off exponentially.
+    """
+    key = _model_route_breaker_key(model)
+    try:
+        if 200 <= status_code < 400:
+            await _redis().delete(key)
+            return
+        if status_code not in {401, 402, 403, 404, 408, 425, 429, 500, 502, 503, 504}:
+            return
+        failures = await _redis().incr(key)
+        # 10, 20, 40 ... seconds, capped so a recovered provider is retried.
+        cooldown = min(MODEL_ROUTE_BREAKER_MAX_SECONDS, 10 * (2 ** min(failures - 1, 8)))
+        await _redis().expire(key, cooldown)
+    except (RedisError, RuntimeError):
+        # Health data is an optimisation, never a reason to fail inference.
+        return
