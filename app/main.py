@@ -23,7 +23,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.database import init_db, close_db
-from app.redis_store import init_redis, close_redis, redis_available
+from app.redis_store import (
+    init_redis, close_redis, redis_available, ensure_request_log_consumer_group,
+)
 import app.config as config_module
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
 from app.sse import sse_broadcaster
@@ -59,6 +61,10 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         await init_redis()
+        # Create the group before declaring application startup complete. A
+        # detached worker that fails before it reaches XGROUP would otherwise
+        # be silent and make telemetry durability look healthy when it is not.
+        await ensure_request_log_consumer_group()
         await sse_broadcaster.start()
         await init_state_from_db()
         request_log_task = asyncio.create_task(run_request_log_worker())
