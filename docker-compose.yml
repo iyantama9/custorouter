@@ -75,9 +75,10 @@ services:
     environment:
       - METRICS_TOKEN=${METRICS_TOKEN:?METRICS_TOKEN must be set}
     entrypoint: ["/bin/sh"]
-    command: ["-ec", "sed 's|__METRICS_TOKEN__|'\"$${METRICS_TOKEN}\"'|g' /etc/prometheus/prometheus.yml.template > /tmp/prometheus.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=30d --web.enable-lifecycle=false"]
+    command: ["-ec", "sed 's|__METRICS_TOKEN__|'\"$${METRICS_TOKEN}\"'|g' /etc/prometheus/prometheus.yml.template > /tmp/prometheus.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=30d"]
     volumes:
       - ./observability/prometheus.yml.template:/etc/prometheus/prometheus.yml.template:ro
+      - ./observability/prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
       - prometheus_data:/prometheus
     ports:
       # 9090 belongs to an unrelated host monitoring stack on production.

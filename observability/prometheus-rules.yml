@@ -1,0 +1,23 @@
+groups:
+  - name: llm-router
+    rules:
+      - alert: RouterProviderHighErrorRate
+        expr: |
+          sum by (provider) (rate(router_inference_requests_total{status_class=~"4xx|5xx"}[5m]))
+          /
+          clamp_min(sum by (provider) (rate(router_inference_requests_total[5m])), 1) > 0.20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Router provider {{ $labels.provider }} has over 20% errors"
+      - alert: RouterDatabasePoolSaturation
+        expr: |
+          router_db_pool_connections{state="in_use"}
+          /
+          clamp_min(router_db_pool_connections{state="total"}, 1) > 0.80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Router database pool is over 80% utilized"
