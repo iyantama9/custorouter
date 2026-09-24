@@ -50,7 +50,10 @@ _LOGIN_GLOBAL_MAX_ATTEMPTS = 30
 _LOGIN_WINDOW_SECONDS = 15 * 60
 _LOGIN_GLOBAL_WINDOW_SECONDS = 60
 _SESSION_TTL_SECONDS = int(os.getenv("DASHBOARD_SESSION_TTL_SECONDS", str(14 * 24 * 60 * 60)))
-_GRAFANA_UPSTREAM_URL = os.getenv("GRAFANA_UPSTREAM_URL", "http://grafana:3000").rstrip("/")
+# The app is attached to both the router and legacy tunnel networks.  `grafana`
+# is also a service name on the legacy network, so use this stack's explicit
+# container name to avoid proxying to an unrelated Grafana instance.
+_GRAFANA_UPSTREAM_URL = os.getenv("GRAFANA_UPSTREAM_URL", "http://llm-router-grafana:3000").rstrip("/")
 _GRAFANA_MAX_BODY_BYTES = 1_048_576
 _HOP_BY_HOP_HEADERS = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
