@@ -30,6 +30,7 @@ from app.translator_openai import (
 )
 from app.sse import sse_broadcaster
 from app.redis_store import (
+    claim_router_key_last_used_touch,
     filter_healthy_model_route_candidates,
     get_cached_json,
     record_model_route_result,
@@ -39,7 +40,11 @@ from redis.exceptions import RedisError
 
 
 logger = logging.getLogger(__name__)
-from app.database import verify_router_api_key, add_router_key_token_usage
+from app.database import (
+    add_router_key_token_usage,
+    touch_router_api_key_last_used,
+    verify_router_api_key,
+)
 
 
 router = APIRouter()
@@ -222,6 +227,14 @@ async def _check_router_auth(request: Request):
         key_row = await verify_router_api_key(token)
         if not key_row:
             return False
+        # Key eligibility remains a fresh PostgreSQL read for every request.
+        # Redis merely coalesces the dashboard-only last_used_at write, which
+        # otherwise adds WAL and lock work on the authentication hot path.
+        if await claim_router_key_last_used_touch(key_row["id"]):
+            try:
+                await touch_router_api_key_last_used(key_row["id"])
+            except Exception:
+                logger.warning("Could not update router-key last_used_at", exc_info=True)
         # Stash the row so downstream code can enforce this key's model
         # allowlist and bill its token quota.
         request.state.router_key = key_row

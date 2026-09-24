@@ -411,19 +411,27 @@ async def verify_router_api_key(key_value: str):
     allowlist and attribute token usage back to this key.
     """
     key = await fetchrow(
-        """UPDATE router_api_keys
-           SET last_used_at = NOW()
+        """SELECT id, token_quota, tokens_used, allowed_models,
+                  model_prompts, model_aliases, model_routes, expires_at
+           FROM router_api_keys
            WHERE key_value = $1
              AND is_active = TRUE
              AND (expires_at IS NULL OR expires_at > NOW())
              AND (token_quota = 0 OR tokens_used < token_quota)
-           RETURNING id, token_quota, tokens_used, allowed_models,
-                     model_prompts, model_aliases, model_routes, expires_at""",
+        """,
         key_value
     )
     if not key:
         return None
     return dict(key)
+
+
+async def touch_router_api_key_last_used(key_id: int) -> None:
+    """Refresh the non-authoritative dashboard timestamp for one key."""
+    await execute(
+        "UPDATE router_api_keys SET last_used_at = NOW() WHERE id = $1",
+        key_id,
+    )
 
 async def update_router_api_key(key_id: int, key_name: str, expires_at, token_quota: int,
                                 allowed_models: str, model_prompts: str, model_aliases: str, model_routes: str,

@@ -235,7 +235,7 @@ class QwenCredentialRotationTests(unittest.TestCase):
 
 
 class DatabaseHotPathTests(unittest.IsolatedAsyncioTestCase):
-    async def test_router_key_verification_uses_one_round_trip(self):
+    async def test_router_key_verification_uses_one_read_round_trip(self):
         row = {
             "id": 7,
             "token_quota": 0,
@@ -250,8 +250,15 @@ class DatabaseHotPathTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["id"], 7)
         fetchrow.assert_awaited_once()
-        self.assertIn("UPDATE router_api_keys", fetchrow.await_args.args[0])
-        self.assertIn("RETURNING", fetchrow.await_args.args[0])
+        self.assertIn("SELECT id", fetchrow.await_args.args[0])
+        self.assertNotIn("UPDATE router_api_keys", fetchrow.await_args.args[0])
+
+    async def test_router_key_last_used_touch_is_a_separate_coalescible_write(self):
+        with patch.object(database, "execute", AsyncMock()) as execute:
+            await database.touch_router_api_key_last_used(7)
+
+        execute.assert_awaited_once()
+        self.assertIn("UPDATE router_api_keys SET last_used_at", execute.await_args.args[0])
 
 class SSEBackpressureTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_client_queue_is_bounded_and_keeps_newest_event(self):

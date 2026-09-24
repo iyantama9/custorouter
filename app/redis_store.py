@@ -25,6 +25,9 @@ REQUEST_LOG_CONSUMER_GROUP = "request-log-writers-v1"
 MODEL_ROUTE_BREAKER_MAX_SECONDS = max(
     10, int(os.getenv("REDIS_MODEL_ROUTE_BREAKER_MAX_SECONDS", "300"))
 )
+ROUTER_KEY_LAST_USED_TOUCH_SECONDS = max(
+    10, int(os.getenv("REDIS_ROUTER_KEY_LAST_USED_TOUCH_SECONDS", "60"))
+)
 
 _client: redis.Redis | None = None
 
@@ -301,3 +304,23 @@ async def record_model_route_result(model: str, status_code: int) -> None:
     except (RedisError, RuntimeError):
         # Health data is an optimisation, never a reason to fail inference.
         return
+
+
+async def claim_router_key_last_used_touch(key_id: int) -> bool:
+    """Return whether this key needs a durable ``last_used_at`` update now.
+
+    Authentication still reads PostgreSQL on every request, so disabling or
+    expiring a router key is effective immediately. This only coalesces the
+    non-security dashboard timestamp write across clients/processes.
+    """
+    try:
+        created = await _redis().set(
+            _key(f"router-key:last-used:{int(key_id)}"),
+            "1",
+            ex=ROUTER_KEY_LAST_USED_TOUCH_SECONDS,
+            nx=True,
+        )
+        return bool(created)
+    except (RedisError, RuntimeError):
+        # Preserve prior accounting semantics if Redis has an outage.
+        return True
