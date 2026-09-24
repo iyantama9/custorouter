@@ -74,12 +74,10 @@ services:
     restart: unless-stopped
     environment:
       - METRICS_TOKEN=${METRICS_TOKEN:?METRICS_TOKEN must be set}
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        sed "s|__METRICS_TOKEN__|$${METRICS_TOKEN}|g" /etc/prometheus/prometheus.yml.template > /tmp/prometheus.yml
-        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=30d --web.enable-lifecycle=false
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      sed "s|__METRICS_TOKEN__|$${METRICS_TOKEN}|g" /etc/prometheus/prometheus.yml.template > /tmp/prometheus.yml &&
+      exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=30d --web.enable-lifecycle=false
     volumes:
       - ./observability/prometheus.yml.template:/etc/prometheus/prometheus.yml.template:ro
       - prometheus_data:/prometheus
@@ -126,7 +124,8 @@ services:
       - grafana_data:/var/lib/grafana
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "127.0.0.1:3000:3000"
+      # 3000 belongs to another host Grafana instance on production.
+      - "127.0.0.1:3001:3000"
     depends_on:
       - prometheus
       - tempo
