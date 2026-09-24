@@ -244,7 +244,7 @@ async def ack_request_log_entries(entry_ids: list[str]) -> None:
     if not entry_ids:
         return
     stream = _request_log_stream_key()
-    pipe = _redis().pipeline(transaction=True)
-    pipe.xack(stream, REQUEST_LOG_CONSUMER_GROUP, *entry_ids)
-    pipe.xdel(stream, *entry_ids)
-    await pipe.execute()
+    # Keep acknowledged entries until XADD's bounded MAXLEN trim removes them.
+    # Deleting the final entry can delete the stream key itself on Redis, which
+    # also discards its consumer group and makes the next XREADGROUP fail.
+    await _redis().xack(stream, REQUEST_LOG_CONSUMER_GROUP, *entry_ids)

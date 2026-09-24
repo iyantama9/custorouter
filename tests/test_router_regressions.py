@@ -337,6 +337,16 @@ class RequestLogStreamTests(unittest.IsolatedAsyncioTestCase):
             "wz/example", 200, "key...", False, 42, 5, 7, 0, "weize",
         )
 
+    async def test_ack_keeps_stream_consumer_group_alive(self):
+        client = AsyncMock()
+        with patch.object(redis_store, "_redis", return_value=client):
+            await redis_store.ack_request_log_entries(["1-0"])
+
+        client.xack.assert_awaited_once_with(
+            "llm-router:request-logs:v1", redis_store.REQUEST_LOG_CONSUMER_GROUP, "1-0",
+        )
+        self.assertFalse(hasattr(client, "xdel") and client.xdel.await_count)
+
 
 class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
     def _request_with_key(self, routes, allowed="wz/first,wz/second", body=None):
