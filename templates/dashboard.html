@@ -1254,13 +1254,13 @@
         </div>
 
         <div class="space-y-1.5">
-          <label class="text-[10px] font-600 text-muted-foreground uppercase tracking-[0.1em] font-mono">Allowed Models</label>
+          <label class="text-[10px] font-600 text-muted-foreground uppercase tracking-[0.1em] font-mono">Direct Models</label>
           <button type="button" @click="openModelPicker()"
                   class="w-full bg-secondary border border-border rounded-xl px-3 py-2 text-sm text-foreground flex items-center justify-between gap-2">
-            <span class="truncate" x-text="routerKeys.selectedModels.length ? `${routerKeys.selectedModels.length} selected` : 'All models'"></span>
+            <span class="truncate" x-text="routerKeys.selectedModels.length ? `${routerKeys.selectedModels.length} selected` : 'All direct models'"></span>
             <i data-lucide="list-filter" class="w-3.5 h-3.5 shrink-0 text-muted-foreground"></i>
           </button>
-          <p class="text-[10px] text-muted-foreground/70">Leave empty to allow every model.</p>
+          <p class="text-[10px] text-muted-foreground/70">Models callable directly. Leave empty to allow every non-route model.</p>
         </div>
 
         <!-- Per-key synthetic model routes. A route is resolved only for this
@@ -1269,7 +1269,7 @@
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
               <label class="text-[10px] font-600 text-muted-foreground uppercase tracking-[0.1em] font-mono">Model Routing</label>
-              <p class="text-[10px] text-muted-foreground/70 mt-1">Create <span class="font-mono">auto</span> (or another name) with ordered fallback models for this key.</p>
+              <p class="text-[10px] text-muted-foreground/70 mt-1">Create <span class="font-mono">auto</span> (or another name) with ordered fallbacks. Route models stay separate from Direct Models.</p>
             </div>
             <button type="button" @click="addModelRoute()"
                     class="shrink-0 px-2.5 py-1.5 rounded-lg border border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">Add route</button>
@@ -1300,7 +1300,7 @@
                   </span>
                 </template>
               </div>
-              <p class="text-[10px] text-muted-foreground/60">Pick from the catalog; router stops at the first successful response. Use arrows to set fallback order (max 24).</p>
+              <p class="text-[10px] text-muted-foreground/60">Pick from the catalog; this does not add models to Direct Models. Router stops at the first successful response (max 24).</p>
             </div>
           </template>
         </div>
@@ -1402,9 +1402,9 @@
     <div class="relative w-full max-w-2xl max-h-[82vh] bg-card border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col">
       <div class="px-5 py-4 border-b border-border flex items-center justify-between gap-4 shrink-0">
         <div>
-          <h3 class="font-display text-lg font-700 tracking-wide text-foreground">Allowed Models</h3>
+          <h3 class="font-display text-lg font-700 tracking-wide text-foreground">Direct Models</h3>
           <p class="text-xs text-muted-foreground mt-0.5"
-             x-text="routerKeys.selectedModels.length ? `${routerKeys.selectedModels.length} selected` : 'Nothing selected — the key can use every model'"></p>
+             x-text="routerKeys.selectedModels.length ? `${routerKeys.selectedModels.length} selected` : 'Nothing selected — the key can use every non-route model'"></p>
         </div>
         <button @click="routerKeys.pickerOpen = false"
                 class="p-2 rounded-xl text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors shrink-0">
@@ -2186,11 +2186,11 @@ function dashboard() {
           return;
         }
         targets.push(id);
-        // A scoped key must allow every candidate. For a key with an
-        // explicit allowlist, selecting a route candidate adds it safely.
-        if (this.routerKeys.selectedModels.length && !this.routerKeys.selectedModels.includes(id)) {
-          this.routerKeys.selectedModels.push(id);
-        }
+        // A model belongs to exactly one group. Moving it into a route keeps
+        // it hidden from direct calls and prevents a client from bypassing
+        // the route's fallback policy.
+        const directIndex = this.routerKeys.selectedModels.indexOf(id);
+        if (directIndex !== -1) this.routerKeys.selectedModels.splice(directIndex, 1);
       }
       route.targets = targets;
     },
@@ -2233,10 +2233,15 @@ function dashboard() {
         const preset = rk.quotaOptions.find(o => o.value === quota);
         rk.quotaPreset = quota === 0 ? 'unlimited' : (preset ? preset.value : 'custom');
         rk.tokenQuota = quota || 100000;
-        rk.selectedModels = (row.allowed_models || '').split(',').map(m => m.trim()).filter(Boolean);
         rk.modelPrompts = this.parseKeyJson(row.model_prompts);
         rk.modelAliases = this.parseKeyJson(row.model_aliases);
         rk.modelRoutes = this.parseModelRoutes(row.model_routes);
+        const routedModels = new Set(rk.modelRoutes.flatMap(route => this.routeTargets(route)));
+        // Older route configs stored candidates in allowed_models. Keep those
+        // two UI groups separate; the cleaned list is persisted on the next
+        // save without requiring a database migration or an outage.
+        rk.selectedModels = (row.allowed_models || '').split(',')
+          .map(m => m.trim()).filter(m => m && !routedModels.has(m));
         // The picker needs the model catalogue to render the current selection.
         if (!this.models.loaded) this.fetchModels();
       } else {
@@ -2272,20 +2277,14 @@ function dashboard() {
     pickerModels() {
       const q = this.routerKeys.pickerSearch.trim().toLowerCase();
       const list = q ? this.models._flat.filter(m => m.search.includes(q)) : this.models._flat;
-      return list.slice(0, 300);   // keep the DOM sane; search narrows it down
+      const routed = new Set(this.routerKeys.modelRoutes.flatMap(route => this.routeTargets(route)));
+      return list.filter(m => !routed.has(m.id)).slice(0, 300); // keep the DOM sane; search narrows it down
     },
 
     toggleKeyModel(id) {
       const i = this.routerKeys.selectedModels.indexOf(id);
       if (i === -1) this.routerKeys.selectedModels.push(id);
-      else {
-        this.routerKeys.selectedModels.splice(i, 1);
-        // Keep the settings valid: a route cannot retain a candidate that is
-        // no longer part of this key's explicit allowlist.
-        this.routerKeys.modelRoutes.forEach(route => {
-          route.targets = this.routeTargets(route).filter(target => target !== id);
-        });
-      }
+      else this.routerKeys.selectedModels.splice(i, 1);
     },
 
     selectAllVisibleModels() {

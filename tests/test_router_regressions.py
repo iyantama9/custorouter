@@ -458,11 +458,19 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, ["wz/first"])
         self.assertEqual(response.status_code, 200)
 
-    def test_route_is_allowed_but_its_candidates_remain_allowlisted(self):
-        request = self._request_with_key({"auto": ["wz/first", "wz/second"]})
+    def test_route_candidates_are_internal_even_if_legacy_allowlisted(self):
+        request = self._request_with_key(
+            {"auto": ["wz/first", "wz/second"]}, allowed="wz/direct"
+        )
         self.assertIsNone(proxy._model_allowed_for_key(request, "auto"))
-        self.assertIsNone(proxy._model_allowed_for_key(request, "wz/first"))
+        self.assertIsNone(proxy._model_allowed_for_key(request, "wz/direct"))
+        self.assertIn("reserved as a fallback", proxy._model_allowed_for_key(request, "wz/first"))
         self.assertIn("not allowed", proxy._model_allowed_for_key(request, "wz/other"))
+
+        routed = proxy._clone_request_for_model_route(
+            request, {"model": "wz/first", "messages": []}, "auto"
+        )
+        self.assertIsNone(proxy._model_allowed_for_key(routed, "wz/first"))
 
     def test_route_reader_keeps_up_to_twenty_four_candidates(self):
         candidates = [f"test/{index}" for index in range(25)]
@@ -472,7 +480,7 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_catalog_exposes_route_but_hides_its_candidates(self):
         request = self._request_with_key(
             {"auto": ["test/first", "test/second"]},
-            allowed="test/first,test/second",
+            allowed="test/direct",
         )
         cache_enabled = proxy._model_catalog_cache_enabled
         proxy._model_catalog_cache_enabled = False
@@ -489,12 +497,13 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
         ids = [model["id"] for model in json.loads(response.body)["data"]]
         self.assertEqual(ids, ["auto"])
 
-    def test_route_settings_reject_route_targets_and_unallowed_models(self):
-        with self.assertRaises(admin._KeySettingsError):
-            admin._parse_key_settings({
-                "allowed_models": ["wz/first"],
-                "model_routes": {"auto": ["fallback"]},
-            })
+    def test_route_settings_keep_direct_and_route_models_separate(self):
+        settings = admin._parse_key_settings({
+            "allowed_models": ["wz/direct"],
+            "model_routes": {"auto": ["wz/fallback"]},
+        })
+        self.assertEqual(settings["allowed_models"], "wz/direct")
+        self.assertEqual(json.loads(settings["model_routes"]), {"auto": ["wz/fallback"]})
         with self.assertRaises(admin._KeySettingsError):
             admin._parse_key_settings({
                 "model_routes": {"auto": ["backup"], "backup": ["wz/first"]},
@@ -504,7 +513,7 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
         body = {"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}
         request = self._request_with_key(
             {"auto": ["test/first", "test/second"]},
-            allowed="test/first,test/second", body=body,
+            allowed="test/direct", body=body,
         )
         attempts = [
             ("json", 503, {"error": {"message": "first unavailable"}}, "key-1"),
@@ -528,7 +537,7 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
         body = {"model": "auto", "messages": [{"role": "user", "content": "Hi"}]}
         request = self._request_with_key(
             {"auto": ["test/first", "test/second"]},
-            allowed="test/first,test/second", body=body,
+            allowed="test/direct", body=body,
         )
         attempts = [
             ("json", 503, {"error": {"message": "first unavailable"}}),
@@ -1212,6 +1221,8 @@ class MobileDashboardPerformanceTests(unittest.TestCase):
         self.assertIn("toggleRouteModel(m.id)", self.dashboard)
         self.assertIn("moveRouteTarget(index, targetIndex", self.dashboard)
         self.assertIn(".route-model-picker-layer { z-index: 110; }", self.dashboard)
+        self.assertIn("Route models stay separate from Direct Models", self.dashboard)
+        self.assertIn("const routed = new Set(this.routerKeys.modelRoutes.flatMap", self.dashboard)
         self.assertNotIn('placeholder="wz/model-a, qc/model-b, nn/model-c"', self.dashboard)
 
     def test_live_updates_are_coalesced(self):

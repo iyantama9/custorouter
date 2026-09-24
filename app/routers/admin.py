@@ -995,10 +995,6 @@ def _parse_key_settings(payload: dict):
                 raise _KeySettingsError(f"Model in route '{route_name}' is too long")
             if candidate == route_name or candidate in routes_in:
                 raise _KeySettingsError(f"Route '{route_name}' cannot target another route")
-            if allowed and candidate not in allowed:
-                raise _KeySettingsError(
-                    f"'{candidate}' in route '{route_name}' isn't in this key's allowed models"
-                )
             if candidate not in candidates:
                 candidates.append(candidate)
         if not candidates:
