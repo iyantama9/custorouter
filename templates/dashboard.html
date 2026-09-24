@@ -2,6 +2,7 @@
 {% block title %}CustoRouter | Dashboard{% endblock %}
 {% block head %}
 <style>
+  [x-cloak] { display: none !important; }
   /* Keep wide operator tables contained.  The table itself may be wider than
      a phone, but only this strip can scroll -- never the dashboard shell. */
   .dashboard-shell,
@@ -456,10 +457,16 @@
         </div>
 
         <!-- ===== Provider API Keys ===== -->
-        <div class="flex items-center gap-2 pt-4">
-          <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Provider API Keys</span>
-          <span class="text-[9px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full border border-border font-mono"
-                x-text="`${keys.length} keys`">—</span>
+        <div class="flex items-center justify-between gap-3 pt-4">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="text-[9px] font-600 text-muted-foreground/70 uppercase tracking-[0.14em] font-mono">Provider API Keys</span>
+            <span class="text-[9px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full border border-border font-mono"
+                  x-text="`${keys.length} keys`">—</span>
+          </div>
+          <button x-show="keys.length && !keyBulkMode" x-cloak @click="startKeyBulkSelection()"
+                  class="text-[11px] font-medium border border-border px-3 py-1.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors whitespace-nowrap">
+            Bulk select
+          </button>
         </div>
 
         <!-- Add key form -->
@@ -497,15 +504,17 @@
           </form>
         </div>
 
-        <!-- Bulk actions bar -->
-        <div x-show="selectedKeys.length" class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-primary/8 border border-primary/20 rounded-xl">
-          <span class="text-xs text-primary font-medium" x-text="`${selectedKeys.length} key(s) selected`"></span>
-          <div class="flex items-center gap-3">
-            <button @click="selectedKeys = []" class="text-xs text-muted-foreground hover:text-foreground transition-colors">Clear</button>
-            <button @click="bulkDeleteSelectedKeys" :disabled="bulkDeleting"
+        <!-- Shown only after explicitly entering bulk-selection mode. -->
+        <div x-show="keyBulkMode" x-cloak class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-primary/8 border border-primary/20 rounded-xl">
+          <span class="text-xs text-primary font-medium" x-text="`${selectedKeys.length} selected`"></span>
+          <div class="flex items-center gap-2">
+            <button @click="toggleAllKeys()" class="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                    x-text="allKeysSelected() ? 'Batal pilih semua' : 'Pilih semua'"></button>
+            <button @click="cancelKeyBulkSelection()" class="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">Batal</button>
+            <button @click="bulkDeleteSelectedKeys" :disabled="bulkDeleting || !selectedKeys.length"
                     class="text-xs font-medium text-destructive hover:opacity-80 transition-opacity disabled:opacity-40 flex items-center gap-1.5">
               <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-              <span x-text="bulkDeleting ? 'Removing…' : 'Delete Selected'"></span>
+              <span x-text="bulkDeleting ? 'Menghapus…' : 'Hapus'"></span>
             </button>
           </div>
         </div>
@@ -516,7 +525,7 @@
             <table class="dashboard-table w-full text-sm">
               <thead>
                 <tr class="border-b border-border">
-                  <th class="px-4 py-3 w-8">
+                  <th x-show="keyBulkMode" x-cloak class="px-4 py-3 w-8">
                     <input type="checkbox" :checked="allKeysSelected()" @change="toggleAllKeys()"
                            class="rounded border-border accent-primary" x-show="keys.length">
                   </th>
@@ -528,7 +537,7 @@
               <tbody>
                 <template x-if="!keys.length">
                   <tr>
-                    <td colspan="4" class="px-4 py-14 text-center">
+                    <td :colspan="keyBulkMode ? 4 : 3" class="px-4 py-14 text-center">
                       <div class="flex flex-col items-center gap-3 text-muted-foreground">
                         <i data-lucide="key-round" class="w-8 h-8 opacity-20"></i>
                         <p class="text-sm font-medium">No keys configured</p>
@@ -539,7 +548,7 @@
                 </template>
                 <template x-for="k in keys" :key="k.prefix">
                   <tr class="border-b border-border/40 hover:bg-secondary/15 transition-colors">
-                    <td class="px-4 py-3">
+                    <td x-show="keyBulkMode" x-cloak class="px-4 py-3">
                       <input type="checkbox" :checked="selectedKeys.includes(k.prefix)" @change="toggleKeySelect(k.prefix)"
                              class="rounded border-border accent-primary">
                     </td>
@@ -816,17 +825,24 @@
               <i data-lucide="refresh-cw" class="w-3 h-3" :class="models.refreshing ? 'animate-spin' : ''"></i>
               <span x-text="models.refreshing ? 'Refreshing…' : 'Refresh All'"></span>
             </button>
+            <button x-show="!models.bulkMode" @click="startModelBulkSelection()"
+                    class="text-[11px] font-medium border border-border px-3 py-2 rounded-xl text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0 whitespace-nowrap">
+              Bulk select
+            </button>
           </div>
         </div>
 
-        <!-- Bulk actions bar -->
-        <div x-show="models.selected.length" class="flex items-center justify-between px-4 py-2.5 bg-primary/8 border border-primary/20 rounded-xl">
-          <span class="text-xs text-primary font-medium" x-text="`${models.selected.length} model(s) selected`"></span>
-          <div class="flex items-center gap-3">
-            <button @click="models.selected = []" class="text-xs text-muted-foreground hover:text-foreground transition-colors">Clear</button>
-            <button @click="bulkRemoveSelectedModels()" :disabled="models.bulkRemoving"
-                    class="text-xs font-medium text-destructive hover:text-destructive/80 transition-colors disabled:opacity-50">
-              <span x-text="models.bulkRemoving ? 'Removing…' : 'Remove from catalog'"></span>
+        <!-- Shown only while editing the catalog in bulk. -->
+        <div x-show="models.bulkMode" x-cloak class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-primary/8 border border-primary/20 rounded-xl">
+          <span class="text-xs text-primary font-medium" x-text="`${models.selected.length} dari ${filteredModels().length} model dipilih`"></span>
+          <div class="flex items-center gap-2">
+            <button @click="toggleSelectAllFilteredModels()" class="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                    x-text="allFilteredModelsSelected() ? 'Batal pilih semua' : 'Pilih semua'"></button>
+            <button @click="cancelModelBulkSelection()" class="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">Batal</button>
+            <button @click="bulkRemoveSelectedModels()" :disabled="models.bulkRemoving || !models.selected.length"
+                    class="text-xs font-medium text-destructive hover:text-destructive/80 transition-colors disabled:opacity-50 flex items-center gap-1.5">
+              <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+              <span x-text="models.bulkRemoving ? 'Menghapus…' : 'Hapus'"></span>
             </button>
           </div>
         </div>
@@ -850,16 +866,10 @@
 
             <template x-if="filteredModels().length">
               <div>
-                <!-- Select all (current page) -->
-                <div class="flex items-center gap-3 px-4 py-2 border-b border-border/40 bg-secondary/10">
-                  <input type="checkbox" :checked="allModelsOnPageSelected()" @change="toggleSelectAllModelsOnPage()"
-                         class="rounded border-border accent-primary">
-                  <span class="text-[10px] text-muted-foreground uppercase tracking-wider font-mono">Select page</span>
-                </div>
                 <div class="divide-y divide-border/40">
                   <template x-for="m in pagedModels()" :key="m.id">
                     <div class="group w-full flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/25 transition-colors">
-                      <input type="checkbox" :checked="models.selected.includes(m.id)" @change="toggleModelSelect(m.id)"
+                      <input x-show="models.bulkMode" x-cloak type="checkbox" :checked="models.selected.includes(m.id)" @change="toggleModelSelect(m.id)"
                              class="rounded border-border accent-primary shrink-0">
                       <button @click="copyModelToClipboard(m.id)"
                               class="flex-1 flex items-center justify-between gap-3 min-w-0 text-left">
@@ -1468,6 +1478,7 @@ function dashboard() {
     addingKey: false,
     detectingKey: false,
     selectedKeys: [],
+    keyBulkMode: false,
     bulkDeleting: false,
     providerMgmt: {
       providers: [],
@@ -1558,6 +1569,7 @@ function dashboard() {
       perPage: 25,
       _flat: [],   // rebuilt by fetchModels; filtering/paging reads from here
       selected: [],   // full ids ("prefix/model"), for bulk catalog removal
+      bulkMode: false,
       bulkRemoving: false,
     },
 
@@ -1905,6 +1917,14 @@ function dashboard() {
     },
 
     // ── Bulk key selection ──
+    startKeyBulkSelection() {
+      this.keyBulkMode = true;
+      this.$nextTick(() => window.refreshLucideIcons());
+    },
+    cancelKeyBulkSelection() {
+      this.selectedKeys = [];
+      this.keyBulkMode = false;
+    },
     toggleKeySelect(prefix) {
       const i = this.selectedKeys.indexOf(prefix);
       if (i === -1) this.selectedKeys.push(prefix);
@@ -1918,7 +1938,7 @@ function dashboard() {
     },
     async bulkDeleteSelectedKeys() {
       if (!this.selectedKeys.length) return;
-      if (!confirm(`Remove ${this.selectedKeys.length} API key(s) permanently?`)) return;
+      if (!confirm(`Hapus ${this.selectedKeys.length} API key secara permanen?`)) return;
       this.bulkDeleting = true;
       try {
         const r = await fetch('/api/keys/bulk-delete', {
@@ -1928,7 +1948,7 @@ function dashboard() {
         });
         const d = await r.json();
         this.toast(`Removed ${d.removed_count}${d.failed_count ? `, ${d.failed_count} failed` : ''}`, d.failed_count ? 'error' : 'success');
-        this.selectedKeys = [];
+        this.cancelKeyBulkSelection();
         this.fetchStatus();
       } catch { this.toast('Network error', 'error'); }
       finally { this.bulkDeleting = false; }
@@ -2483,29 +2503,37 @@ function dashboard() {
     },
 
     // ── Bulk model selection ──
+    startModelBulkSelection() {
+      this.models.bulkMode = true;
+      this.$nextTick(() => window.refreshLucideIcons());
+    },
+    cancelModelBulkSelection() {
+      this.models.selected = [];
+      this.models.bulkMode = false;
+    },
     toggleModelSelect(id) {
       const i = this.models.selected.indexOf(id);
       if (i === -1) this.models.selected.push(id);
       else this.models.selected.splice(i, 1);
     },
-    allModelsOnPageSelected() {
-      const page = this.pagedModels();
-      return page.length > 0 && page.every(m => this.models.selected.includes(m.id));
+    allFilteredModelsSelected() {
+      const filtered = this.filteredModels();
+      return filtered.length > 0 && filtered.every(m => this.models.selected.includes(m.id));
     },
-    toggleSelectAllModelsOnPage() {
-      const page = this.pagedModels();
-      if (this.allModelsOnPageSelected()) {
-        this.models.selected = this.models.selected.filter(id => !page.some(m => m.id === id));
+    toggleSelectAllFilteredModels() {
+      const filtered = this.filteredModels();
+      if (this.allFilteredModelsSelected()) {
+        this.models.selected = this.models.selected.filter(id => !filtered.some(m => m.id === id));
       } else {
         const merged = new Set(this.models.selected);
-        page.forEach(m => merged.add(m.id));
+        filtered.forEach(m => merged.add(m.id));
         this.models.selected = [...merged];
       }
     },
     async bulkRemoveSelectedModels() {
       const selected = this.models.selected;
       if (!selected.length) return;
-      if (!confirm(`Remove ${selected.length} model(s) from their provider's catalog?`)) return;
+      if (!confirm(`Hapus ${selected.length} model dari katalog provider?`)) return;
 
       // Only custom providers store their model list in a form this endpoint
       // can rewrite -- built-ins are sourced from env vars and aren't
@@ -2542,6 +2570,7 @@ function dashboard() {
           else skippedCount += entries.length;
         }
         this.models.selected = [];
+        this.models.bulkMode = false;
         await this.fetchModels();
         if (removedCount) this.toast(`Removed ${removedCount} model(s) from catalog${skippedCount ? `, skipped ${skippedCount} (not editable here)` : ''}`, 'success');
         else this.toast('Nothing removed -- selected models belong to built-in providers, which are sourced from .env instead', 'error');
