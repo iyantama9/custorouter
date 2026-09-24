@@ -23,6 +23,7 @@ from app.redis_store import (
     claim_stale_request_log_batch,
     ensure_request_log_consumer_group,
     read_request_log_batch,
+    touch_request_log_worker_heartbeat,
 )
 
 
@@ -71,6 +72,7 @@ async def run_request_log_worker() -> None:
     while True:
         now = asyncio.get_running_loop().time()
         try:
+            await touch_request_log_worker_heartbeat()
             entries: list[tuple[str, dict[str, str]]] = []
             if now >= next_reclaim:
                 entries = await claim_stale_request_log_batch(consumer, _BATCH_SIZE)

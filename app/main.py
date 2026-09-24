@@ -25,6 +25,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from app.database import init_db, close_db
 from app.redis_store import (
     init_redis, close_redis, redis_available, ensure_request_log_consumer_group,
+    request_log_worker_healthy,
 )
 import app.config as config_module
 from app.config import init_state_from_db, auto_reset_limited_keys, PORT, SSL_KEYFILE, SSL_CERTFILE, ROUTER_DOMAIN
@@ -102,10 +103,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 @app.get("/health", include_in_schema=False)
 async def health_check():
-    """Lightweight liveness endpoint for the container orchestrator."""
+    """Liveness plus the shared state/telemetry workers required in production."""
     if not await redis_available():
         return JSONResponse(status_code=503, content={"status": "degraded", "redis": "unavailable"})
-    return {"status": "ok", "redis": "ok"}
+    if not await request_log_worker_healthy():
+        return JSONResponse(status_code=503, content={"status": "degraded", "redis": "ok", "request_log_worker": "unavailable"})
+    return {"status": "ok", "redis": "ok", "request_log_worker": "ok"}
 
 
 _INFERENCE_REQUEST_PATHS = {

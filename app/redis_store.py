@@ -256,6 +256,18 @@ async def ack_request_log_entries(entry_ids: list[str]) -> None:
     await _redis().xack(stream, REQUEST_LOG_CONSUMER_GROUP, *entry_ids)
 
 
+async def touch_request_log_worker_heartbeat() -> None:
+    """Expose worker liveness separately from a successful Redis PING."""
+    await _redis().set(_key("request-log-worker:heartbeat"), "1", ex=60)
+
+
+async def request_log_worker_healthy() -> bool:
+    try:
+        return bool(await _redis().exists(_key("request-log-worker:heartbeat")))
+    except (RedisError, RuntimeError):
+        return False
+
+
 def _model_route_breaker_key(model: str) -> str:
     """Return a bounded Redis key for one fallback candidate.
 

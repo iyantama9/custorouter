@@ -354,6 +354,16 @@ class RequestLogStreamTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(hasattr(client, "xdel") and client.xdel.await_count)
 
+    async def test_log_worker_heartbeat_is_expiring_and_health_checked(self):
+        client = AsyncMock()
+        client.exists.return_value = 1
+        with patch.object(redis_store, "_redis", return_value=client):
+            await redis_store.touch_request_log_worker_heartbeat()
+            self.assertTrue(await redis_store.request_log_worker_healthy())
+
+        client.set.assert_awaited_once()
+        self.assertEqual(client.set.await_args.kwargs["ex"], 60)
+
 
 class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
     def _request_with_key(self, routes, allowed="wz/first,wz/second", body=None):
