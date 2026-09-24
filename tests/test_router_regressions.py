@@ -1215,6 +1215,12 @@ class MobileDashboardPerformanceTests(unittest.TestCase):
         self.assertIn("sm:flex-row", self.dashboard)
         self.assertIn("dashboard-table--providers", self.dashboard)
 
+    def test_provider_key_form_uses_compiled_desktop_width_utility(self):
+        css = (ROOT / "static" / "tailwind.min.css").read_text(encoding="utf-8")
+        self.assertIn("sm:w-52", self.dashboard)
+        self.assertIn(".sm\\:w-52", css)
+        self.assertNotIn("sm:w-44", self.dashboard)
+
     def test_model_routes_use_catalog_picker_not_free_text_candidates(self):
         self.assertIn("openRouteModelPicker(index)", self.dashboard)
         self.assertIn("routePickerModels()", self.dashboard)

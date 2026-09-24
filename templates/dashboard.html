@@ -473,7 +473,7 @@
         <div class="p-5 bg-card border border-border rounded-2xl">
           <p class="text-[9px] font-600 text-muted-foreground/60 uppercase tracking-[0.14em] font-mono mb-4">Add Provider Key</p>
           <form @submit.prevent="addKey" novalidate class="flex flex-col gap-2 sm:flex-row">
-            <div class="relative w-full shrink-0 sm:w-44" x-data="{ open: false }" @click.outside="open = false">
+            <div class="relative w-full shrink-0 sm:w-52" x-data="{ open: false }" @click.outside="open = false">
               <button type="button" @click="open = !open"
                       class="w-full bg-secondary border border-border rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary/40 text-foreground flex items-center justify-between gap-2">
                 <span class="truncate" x-text="newKeyType === 'auto' ? 'Auto-Detect' : (providerMgmt.providers.find(p => p.prefix === newKeyType)?.name || newKeyType)"></span>
