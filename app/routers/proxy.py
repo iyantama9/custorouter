@@ -758,6 +758,57 @@ async def _dispatch_custom_provider(prefix: str, payload: dict, stream: bool, di
     return "json", last_status, last_body
 
 
+async def _prime_openai_stream(response: httpx.Response):
+    """Read enough of an OpenAI SSE stream to expose an immediate error.
+
+    Some third-party gateways (including Bansos) reply with HTTP 200 and only
+    reveal overload/credit errors as their first ``data:`` event. Returning
+    that response straight to the caller makes clients treat it as a broken
+    successful stream and bypasses the key rotation path.
+
+    The consumed chunks and original iterator are kept so the normal relay
+    replays every byte once a real stream event is found.
+    """
+    iterator = response.aiter_bytes()
+    prefetched: list[bytes] = []
+    buffer = ""
+
+    # Providers commonly start with one SSE comment/ping. Four chunks cover
+    # that plus fragmented event/data lines while keeping the preflight small.
+    for _ in range(4):
+        try:
+            chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            break
+        prefetched.append(chunk)
+        buffer += chunk.decode("utf-8", errors="ignore")
+        lines = buffer.split("\n")
+        buffer = lines.pop()
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                return prefetched, None, iterator
+            try:
+                event = json.loads(data_str)
+            except Exception:
+                continue
+            error = event.get("error") if isinstance(event, dict) else None
+            if not isinstance(error, dict):
+                return prefetched, None, iterator
+            try:
+                status = int(error.get("status") or error.get("code") or 502)
+            except (TypeError, ValueError):
+                status = 502
+            if status < 400 or status > 599:
+                status = 502
+            return prefetched, (status, {"error": error}), iterator
+
+    return prefetched, None, iterator
+
+
 async def _dispatch_custom_openai(prefix: str, payload: dict, stream: bool, retry_state=None):
     """Forward an OpenAI request to an OpenAI provider without translating it."""
     info = config_module.CUSTOM_PROVIDERS[prefix]
@@ -779,14 +830,26 @@ async def _dispatch_custom_openai(prefix: str, payload: dict, stream: bool, retr
                 upstream_request = client.build_request("POST", url, headers=headers, json=payload)
                 response = await client.send(upstream_request, stream=True)
                 if response.status_code == 200:
-                    return "stream", 200, response, key
-                raw_body = await response.aread()
-                await response.aclose()
-                try:
-                    last_body = json.loads(raw_body)
-                except Exception:
-                    last_body = {"error": {"message": raw_body.decode(errors="replace")}}
-                last_status = response.status_code
+                    prefetched, in_band_error, iterator = await _prime_openai_stream(response)
+                    if in_band_error is not None:
+                        await response.aclose()
+                        last_status, last_body = in_band_error
+                    else:
+                        # Keep the response contract unchanged for callers and
+                        # tests while retaining the iterator position after the
+                        # preflight. The relay consumes these runtime values
+                        # before streaming to the client.
+                        response.extensions["router_prefetched_chunks"] = prefetched
+                        response.extensions["router_stream_iterator"] = iterator
+                        return "stream", 200, response, key
+                if response.status_code != 200:
+                    raw_body = await response.aread()
+                    await response.aclose()
+                    try:
+                        last_body = json.loads(raw_body)
+                    except Exception:
+                        last_body = {"error": {"message": raw_body.decode(errors="replace")}}
+                    last_status = response.status_code
             else:
                 async with _borrow_custom_client() as client:
                     response = await client.post(url, headers=headers, json=payload)
@@ -1682,8 +1745,22 @@ async def _relay_openai_upstream_stream(
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
     output_chars = 0
 
+    extensions = getattr(resp, "extensions", {})
+    prefetched_chunks = extensions.pop("router_prefetched_chunks", ())
+    stream_iterator = extensions.pop("router_stream_iterator", None)
+
+    async def _chunks():
+        for chunk in prefetched_chunks:
+            yield chunk
+        if stream_iterator is None:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        else:
+            async for chunk in stream_iterator:
+                yield chunk
+
     try:
-        async for chunk in resp.aiter_bytes():
+        async for chunk in _chunks():
             buffer += chunk.decode("utf-8", errors="ignore")
             lines = buffer.split("\n")
             buffer = lines.pop()

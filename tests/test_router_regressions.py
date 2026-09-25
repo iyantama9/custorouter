@@ -945,6 +945,45 @@ class CustomProviderForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rotate.call_count, 2)
         self.assertTrue(retry_state["rotated"])
 
+    async def test_custom_openai_stream_in_band_429_rotates_key(self):
+        seen = []
+
+        def handle(request):
+            seen.append(request.headers["authorization"])
+            if len(seen) == 1:
+                return httpx.Response(
+                    200,
+                    text=(
+                        ": ping\n\n"
+                        "data: {\"error\":{\"code\":429,\"status\":429,\"message\":\"Gateway at capacity\"}}\n\n"
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n')
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        retry_state = {}
+        try:
+            with (
+                patch.dict(config.CUSTOM_PROVIDERS, {"test": {"base_url": "https://provider.test/v1", "api_format": "openai"}}),
+                patch.dict(config.CUSTOM_PROVIDER_KEYS, {"test": ["key-1", "key-2"]}),
+                patch.object(config, "get_current_custom_key", return_value="key-1"),
+                patch.object(config, "rotate_custom_key") as rotate,
+                patch.object(proxy, "_custom_client", client),
+            ):
+                kind, status, response, key = await proxy._dispatch_custom_openai(
+                    "test", {"model": "example", "messages": [], "stream": True}, True,
+                    retry_state=retry_state,
+                )
+                await response.aclose()
+        finally:
+            await client.aclose()
+
+        self.assertEqual((kind, status, key), ("stream", 200, "key-2"))
+        self.assertEqual(seen, ["Bearer key-1", "Bearer key-2"])
+        rotate.assert_called_once_with("test")
+        self.assertTrue(retry_state["rotated"])
+
     async def test_custom_anthropic_quota_tries_all_keys_before_failure(self):
         seen = []
 
