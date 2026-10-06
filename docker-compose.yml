@@ -22,7 +22,11 @@ services:
     image: redis:7.4.2-alpine
     container_name: llm-router-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
+    # Hard memory cap so an unbounded stream/log key can never OOM the shared
+    # host; allkeys-lru is safe because real usage (~8MB) is far under the cap.
+    # save "" disables periodic RDB forks (redundant with AOF and the main
+    # flash-I/O killer on this SBC); restarts recover from the AOF.
+    command: ["redis-server", "--appendonly", "yes", "--save", "", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     volumes:
@@ -42,6 +46,12 @@ services:
     environment:
       - DATABASE_URL=postgresql://llm_router_user:${POSTGRES_PASSWORD}@postgres:5432/llm_router
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Performance: raise the shared httpx upstream pool and the asyncpg
+      # connection pool so sustained concurrent inference doesn't block on
+      # pool checkout. Defaults are 200 conn / 50 keepalive and DB max 10.
+      - HTTP_MAX_CONNECTIONS=400
+      - HTTP_MAX_KEEPALIVE_CONNECTIONS=200
+      - DB_POOL_MAX_SIZE=20
       # Must match the port uvicorn actually binds (see Dockerfile CMD). Playground
       # calls http://127.0.0.1:$PORT/v1/messages internally, so a mismatch here
       # breaks the Playground with "All connection attempts failed".
