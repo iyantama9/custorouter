@@ -90,6 +90,17 @@ QWEN_CLOUD_API_KEYS_ENV = [k.strip() for k in QWEN_CLOUD_API_KEYS_RAW.split(",")
 MARKETKU_API_KEYS_RAW = os.getenv("MARKETKU_API_KEYS", os.getenv("MARKETKU_API_KEY", ""))
 MARKETKU_API_KEYS_ENV = [k.strip() for k in MARKETKU_API_KEYS_RAW.split(",") if k.strip()]
 
+# Per-provider modality (image / TTS / video) base URLs. Each entry is optional:
+# when empty, the router falls back to provider-specific defaults (byNARA's
+# dedicated image/video host, Qwen Cloud's native DashScope host) or forwards
+# the request to the provider's chat base URL.
+NARA_IMAGES_BASE_URL = os.getenv("NARA_IMAGES_BASE_URL", "https://api-images.bynara.id/v1").rstrip("/")
+QWEN_NATIVE_BASE_URL = os.getenv("QWEN_NATIVE_BASE_URL", "https://dashscope-intl.aliyuncs.com/api/v1").rstrip("/")
+MODALITY_BASE_URLS = {
+    "nry": {"images": NARA_IMAGES_BASE_URL},
+    "qc": {"native": QWEN_NATIVE_BASE_URL},
+}
+
 # Per-model fallback order for Qwen Cloud when ALL keys have exhausted the requested model
 QC_FALLBACK_ORDER_RAW = os.getenv("QC_FALLBACK_ORDER", "qwen3.7-max,qwen-max,qwen-plus,deepseek-v3.2,glm-5.2,kimi-k2.7-code,qwen-turbo")
 QC_FALLBACK_ORDER = [m.strip() for m in QC_FALLBACK_ORDER_RAW.split(",") if m.strip()]

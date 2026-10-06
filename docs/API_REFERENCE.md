@@ -28,8 +28,27 @@ x-api-key: <router-client-key>
 | `POST` | `/v1/v1/messages` | Compatibility alias for duplicated prefixes |
 | `POST` | `/v1/messages/count_tokens` | Estimate Anthropic-style input tokens |
 | `POST` | `/v1/v1/messages/count_tokens` | Token-count compatibility alias |
+| `POST` | `/v1/images/generations` | OpenAI-compatible text-to-image |
+| `POST` | `/v1/images/edits` | OpenAI-compatible image edit (JSON or multipart) |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible text-to-speech (Qwen-TTS native) |
+| `POST` | `/v1/audio/transcriptions` | OpenAI-compatible speech-to-text |
+| `POST` | `/v1/videos` | Create a video task (byNARA / Qwen native async) |
+| `GET` | `/v1/videos/{id}` | Poll a video task (`?provider=nry|qc&model=<alias>`) |
+| `GET` | `/v1/videos/{id}/download` | Stream the finished video binary |
+| `GET` | `/v1/multimodal/base` | Discover the base URL each modality forwards to |
 
 The model list is filtered by the authenticated client key when an allowlist exists. Streaming responses use the event format expected by the selected compatibility API. OpenAI requests routed to OpenAI-format custom providers are forwarded without protocol translation; only the provider prefix in `model` is removed and an explicitly configured per-key model prompt may be prepended.
+
+### Multimodal (image / TTS / video)
+
+Image, TTS, and video requests use the same provider prefixes, per-key model
+allowlist, and key rotation as chat. byNARA image and video models forward to
+`NARA_IMAGES_BASE_URL` (default `https://api-images.bynara.id/v1`); Qwen
+image, TTS, and video models forward to `QWEN_NATIVE_BASE_URL` (default
+`https://dashscope-intl.aliyuncs.com/api/v1`). Other providers fall back to
+their chat base URL. `/v1/models` includes a `modality` and `endpoint` field
+on every entry so clients can select the right URL, and `GET /v1/multimodal/base`
+returns the configured base URLs without hardcoding them.
 
 ## Request fields
 

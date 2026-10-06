@@ -161,6 +161,18 @@ _INFERENCE_REQUEST_PATHS = {
     "/v1/v1/messages/count_tokens",
     "/v1/chat/completions",
     "/chat/completions",
+    # Multimodal (image / TTS / video) endpoints, so the migration drain
+    # gate and active-inference counters cover them the same way as chat.
+    "/v1/images/generations",
+    "/images/generations",
+    "/v1/images/edits",
+    "/images/edits",
+    "/v1/audio/speech",
+    "/audio/speech",
+    "/v1/audio/transcriptions",
+    "/audio/transcriptions",
+    "/v1/videos",
+    "/videos",
 }
 
 
