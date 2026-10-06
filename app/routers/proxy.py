@@ -2376,6 +2376,20 @@ async def _forward_multimodal_json(
 
     url = f"{base_url.rstrip('/')}/{subpath.lstrip('/')}"
     log_model = f"{display_model or model}"
+
+    # Hold a custom provider's pool briefly after a shared rate-limit hit.
+    # Agnes free-tier keys share one global limit, so rotating the key does
+    # not help; returning 429 + Retry-After tells the client to back off
+    # instead of the router hammering N keys against the same limit.
+    if provider in config_module.CUSTOM_PROVIDERS and config_module.is_custom_rate_limited(provider):
+        remaining = max(0, int(config_module.CUSTOM_RATE_LIMIT_COOLDOWN_SECONDS - (time.time() - config_module.custom_rate_limited_at.get(provider, 0))))
+        add_request_log(log_model, 429, current_key, False, 0, 0, 0, provider=provider)
+        return JSONResponse(
+            status_code=429,
+            content={"error": {"message": f"Provider '{provider}' is rate-limited; retry after {remaining}s.", "type": "rate_limit_exceeded"}},
+            headers={"Retry-After": str(remaining)},
+        )
+
     start = time.time()
 
     try:
@@ -2393,8 +2407,19 @@ async def _forward_multimodal_json(
     elapsed_ms = int((time.time() - start) * 1000)
     if status_code in _RETRYABLE_UPSTREAM_STATUSES:
         _multimodal_rotate(provider, model, current_key)
+    if provider in config_module.CUSTOM_PROVIDERS and status_code in (429, 503):
+        # Mark the pool as rate-limited so the next request gets a clean
+        # 429 + Retry-After instead of another upstream attempt.
+        config_module.mark_custom_rate_limited(provider)
+        body = {"error": {"message": f"Provider '{provider}' rate-limited; retry shortly.", "type": "rate_limit_exceeded"}, "upstream": body}
     add_request_log(log_model, status_code, current_key, status_code in _RETRYABLE_UPSTREAM_STATUSES, elapsed_ms, 0, 0, provider=provider)
     await _broadcast_request_log()
+    if provider in config_module.CUSTOM_PROVIDERS and status_code in (429, 503):
+        return JSONResponse(
+            status_code=status_code,
+            content=body,
+            headers={"Retry-After": str(config_module.CUSTOM_RATE_LIMIT_COOLDOWN_SECONDS)},
+        )
     return JSONResponse(status_code=status_code, content=body)
 
 
@@ -2912,7 +2937,30 @@ async def videos_create(request: Request):
     if provider == "qc" and _is_video_model(upstream_model):
         return await _forward_qwen_video_create(upstream_model, payload, "videos", display_model=display_model)
 
-    return await _forward_multimodal_json(provider, upstream_model, "videos", {"model": upstream_model, **{k: v for k, v in payload.items() if k != "model"}}, display_model=display_model)
+    # Agnes video models (custom provider "ags"/"agp" pointing at apihub.
+    # agnes-ai.com) use `ti2vid` (text/image-to-video), `keyframes`, or
+    # `multi_reference` as their `mode` value. `t2v` is byNARA's naming,
+    # which Agnes rejects with "invalid mode". When the client omits mode,
+    # default to `ti2vid` so a plain text prompt works out of the box.
+    # `duration` is a v2.0-only field; 2.5-series models reject it.
+    is_agnes_video = provider in ("ags", "agp") or (
+        provider in config_module.CUSTOM_PROVIDERS
+        and config_module.CUSTOM_PROVIDERS[provider].get("base_url", "").startswith("https://apihub.agnes-ai.com")
+    )
+    upstream_video_payload = {"model": upstream_model}
+    for k, v in payload.items():
+        if k == "model":
+            continue
+        if k == "duration" and is_agnes_video and "video-2.5" in upstream_model:
+            continue
+        upstream_video_payload[k] = v
+    if is_agnes_video and not upstream_video_payload.get("mode"):
+        upstream_video_payload["mode"] = "ti2vid"
+    elif is_agnes_video and upstream_video_payload.get("mode") == "t2v":
+        # byNARA-style alias; map it to Agnes' ti2vid so clients that copy
+        # the byNARA docs still work against the Agnes gateway.
+        upstream_video_payload["mode"] = "ti2vid"
+    return await _forward_multimodal_json(provider, upstream_model, "videos", upstream_video_payload, display_model=display_model)
 
 
 async def _forward_qwen_video_create(upstream_model: str, payload: dict, subpath: str, display_model: str | None = None, files: list | None = None, key: str | None = None) -> JSONResponse:

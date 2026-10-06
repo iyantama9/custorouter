@@ -197,6 +197,13 @@ CUSTOM_PROVIDERS: dict[str, dict] = {}
 CUSTOM_PROVIDER_KEYS: dict[str, list] = {}
 # prefix -> current rotation index into CUSTOM_PROVIDER_KEYS[prefix]
 custom_key_index: dict[str, int] = {}
+
+# prefix -> time.time() when the pool's rate limit was last observed, used to
+# hold all of a provider's keys briefly after a 429 rather than rotating
+# through the same shared limit immediately (Agnes free-tier shares one
+# global rate limit across all keys on the same account).
+custom_rate_limited_at: dict[str, float] = {}
+CUSTOM_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("CUSTOM_RATE_LIMIT_COOLDOWN_SECONDS", "30"))
 # built-in provider prefixes the admin has removed (see disabled_providers table)
 DISABLED_PROVIDERS: set = set()
 
@@ -663,6 +670,23 @@ def get_current_custom_key(prefix: str):
         return ""
     idx = custom_key_index.get(prefix, 0) % len(keys)
     return keys[idx]
+
+
+def mark_custom_rate_limited(prefix: str) -> None:
+    """Record a shared rate-limit hit for a custom provider's whole key pool."""
+    global custom_rate_limited_at
+    custom_rate_limited_at[prefix] = time.time()
+
+
+def is_custom_rate_limited(prefix: str) -> bool:
+    """True while the pool's post-429 cooldown is still in effect."""
+    import time as _time
+    stamp = custom_rate_limited_at.get(prefix)
+    if not stamp:
+        return False
+    if _time.time() - stamp >= CUSTOM_RATE_LIMIT_COOLDOWN_SECONDS:
+        return False
+    return True
 
 
 def rotate_custom_key(prefix: str, reason: str = "Limited"):
